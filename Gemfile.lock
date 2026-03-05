@@ -93,11 +93,37 @@ GEM
       reline (>= 0.3.8)
     dotenv (3.2.0)
     drb (2.2.3)
+    dry-configurable (0.16.1)
+      dry-core (~> 0.6)
+      zeitwerk (~> 2.6)
+    dry-container (0.11.0)
+      concurrent-ruby (~> 1.0)
+    dry-core (0.9.1)
+      concurrent-ruby (~> 1.0)
+      zeitwerk (~> 2.6)
+    dry-inflector (0.3.0)
+    dry-logic (1.3.0)
+      concurrent-ruby (~> 1.0)
+      dry-core (~> 0.9, >= 0.9)
+      zeitwerk (~> 2.6)
+    dry-struct (1.5.2)
+      dry-core (~> 0.9, >= 0.9)
+      dry-types (~> 1.6)
+      ice_nine (~> 0.11)
+      zeitwerk (~> 2.6)
+    dry-types (1.6.1)
+      concurrent-ruby (~> 1.0)
+      dry-container (~> 0.3)
+      dry-core (~> 0.9, >= 0.9)
+      dry-inflector (~> 0.1, >= 0.1.2)
+      dry-logic (~> 1.3, >= 1.3)
+      zeitwerk (~> 2.6)
     ed25519 (1.4.0)
     erb (6.0.2)
     erubi (1.13.1)
     et-orbi (1.4.0)
       tzinfo
+    ffi (1.15.5)
     fugit (1.12.1)
       et-orbi (~> 1.4)
       raabro (~> 1.4)
@@ -105,6 +131,7 @@ GEM
       activesupport (>= 6.1)
     i18n (1.14.8)
       concurrent-ruby (~> 1.0)
+    ice_nine (0.11.2)
     io-console (0.8.2)
     irb (1.17.0)
       pp (>= 0.6.0)
@@ -300,6 +327,14 @@ GEM
       net-ssh (>= 2.8.0)
       ostruct
     stringio (3.2.0)
+    tdlib-ruby (3.1.0)
+      concurrent-ruby (~> 1.1)
+      dry-configurable (~> 0.13)
+      ffi (~> 1.15.0)
+      tdlib-schema
+    tdlib-schema (1.7.0.4)
+      dry-struct (~> 1.0)
+      dry-types (~> 1.0)
     thor (1.5.0)
     thruster (0.1.18)
     thruster (0.1.18-aarch64-linux)
@@ -343,6 +378,7 @@ DEPENDENCIES
   solid_cable
   solid_cache
   solid_queue
+  tdlib-ruby
   thruster
   tzinfo-data
 
