@@ -14,6 +14,14 @@ bundle install
 bin/rails db:migrate
 ```
 
+新增持久化表：
+- `telegram_accounts`: TD 会话状态
+- `telegram_account_profiles`: 登录账号资料与监听配置（`watched_chat_ids`）
+- `telegram_chats`: 每个登录账号同步到的聊天基础信息（id/名称/头像/来源账号）
+- `telegram_messages`: 监听到的消息内容（按账号+群+消息ID去重）
+- `system_users`: 你的系统用户（认证）
+- `system_user_chat_accesses`: 系统用户可见群组授权
+
 ## 3. 配置环境变量
 
 ```bash
@@ -52,6 +60,12 @@ bin/rails server
 
 ```bash
 curl http://127.0.0.1:3000/api/telegram/sessions
+```
+
+### 查询聊天列表（按 chat 去重，多个来源默认返回第一个来源）
+
+```bash
+curl http://127.0.0.1:3000/api/telegram/chats
 ```
 
 ### 创建会话
@@ -110,6 +124,88 @@ curl http://127.0.0.1:3000/api/telegram/sessions/<session_id>
 ```
 
 当 `state=ready` 时，`me` 会返回当前账号信息。
+
+### 配置该账号监听的群组列表
+
+```bash
+curl -X PATCH http://127.0.0.1:3000/api/telegram/sessions/<session_id>/watch_targets \
+  -H "Content-Type: application/json" \
+  -d '{"chat_ids":[-1001234567890,-1009999999999]}'
+```
+
+配置结果在返回字段 `profile.watched_chat_ids`。  
+配置后会立即回填最近消息到 `telegram_messages`，并持续监听新消息入库。
+
+### 手动同步该账号的聊天列表（登录成功后也会自动同步）
+
+```bash
+curl -X POST "http://127.0.0.1:3000/api/telegram/sessions/<session_id>/sync_chats?limit=500"
+```
+
+返回会包含 `sync` 字段，例如：
+- `total_chat_ids`: 本次拿到的 chat id 数量
+- `upserted`: 成功写入/更新数量
+- `failed`: 失败数量
+- `errors`: 失败明细（含 TD 返回信息）
+- `from_get_chats` / `from_search_chats` / `from_search_chats_on_server`: 各阶段命中数量
+- `from_updates_cache`: 如果 API 阶段全空，更新流已入库的聊天数量
+
+### 手动回填该账号监听群组的消息到 `telegram_messages`
+
+不传 `chat_ids` 时，默认使用该账号的 `profile.watched_chat_ids`。
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/telegram/sessions/<session_id>/sync_messages \
+  -H "Content-Type: application/json" \
+  -d '{"wait_seconds":0.2}'
+```
+
+说明：
+- `chat_id` 是按群逐个拉取（每次请求一个群），接口会对每个群循环分页直到拉完。
+- `message_limit` 不传时表示尽量拉全量；传了就按每群上限截断。
+
+## 6. 系统用户认证与搜索
+
+### 管理员创建系统用户（仅管理员可调用）
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <admin_token>" \
+  -d '{"username":"u1","password":"pass123456","admin":false,"chat_ids":[-1001234567890]}'
+```
+
+说明：
+- `chat_ids` 只能填写“已监听群组”，即所有 `telegram_account_profiles.watched_chat_ids` 的并集。
+- 普通用户无法自行注册或修改自己的群组权限。
+
+### 登录获取 token
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"u1","password":"pass123456"}'
+```
+
+### 查看当前用户可见群组（需要 Bearer Token）
+
+```bash
+curl http://127.0.0.1:3000/api/me/chats \
+  -H "Authorization: Bearer <token>"
+```
+
+### 搜索消息（需要 Bearer Token）
+
+```bash
+curl "http://127.0.0.1:3000/api/me/search/messages?q=hello&chat_id=-1001234567890&limit=50" \
+  -H "Authorization: Bearer <token>"
+```
+
+### 初始化首个管理员（一次性）
+
+```bash
+bin/rails runner "u = SystemUser.find_or_create_by!(username: 'admin') { |x| x.password = 'pass123456'; x.password_confirmation = 'pass123456' }; u.update!(admin: true); puts u.api_token"
+```
 
 ### 销毁会话
 

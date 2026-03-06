@@ -3,7 +3,6 @@
 base_path = Rails.root.join("lib")
 base_name = "libtdjson"
 
-
 lib_path =
   case RUBY_PLATFORM
   when /darwin/
@@ -16,7 +15,6 @@ lib_path =
     Rails.logger.warn "TDLib is not supported on this platform: #{RUBY_PLATFORM}"
     nil
   end
-
 
 if lib_path&.exist?
   Rails.application.config.td_lib_path = lib_path.to_s

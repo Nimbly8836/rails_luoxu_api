@@ -3,12 +3,13 @@
 module Api
   module Telegram
     class SessionsController < ApplicationController
-      before_action :find_account, only: %i[show phone code password destroy]
+      before_action :authenticate_system_user!
+      before_action :find_account, only: %i[show phone code password destroy watch_targets sync_chats sync_messages]
 
       rescue_from ::Telegram::TdSession::InvalidStateError, with: :render_invalid_state
 
       def index
-        accounts = TelegramAccount.order(created_at: :desc).limit(100)
+        accounts = TelegramAccount.includes(:profile, :telegram_chats).order(created_at: :desc).limit(100)
         render json: accounts.map { |account| account_snapshot(account) }
       end
 
@@ -48,6 +49,37 @@ module Api
         head :no_content
       end
 
+      def watch_targets
+        chat_ids = Array(params.require(:chat_ids)).map(&:to_i).uniq
+        profile = TelegramAccountProfile.find_or_initialize_by(telegram_account_id: @account.id)
+        profile.watched_chat_ids = chat_ids
+        profile.save!
+        sync = ensure_session!.sync_messages_for_chats(
+          chat_ids:,
+          limit_per_chat: params[:message_limit],
+          wait_seconds: params[:wait_seconds]
+        )
+        render json: account_snapshot(@account.reload).merge(message_sync: sync)
+      end
+
+      def sync_chats
+        session = ensure_session!
+        sync_result = session.sync_chats_now(limit: params[:limit])
+        render json: account_snapshot(@account.reload).merge(sync: sync_result)
+      end
+
+      def sync_messages
+        profile = TelegramAccountProfile.find_by(telegram_account_id: @account.id)
+        fallback_ids = profile&.watched_chat_ids
+        chat_ids = Array(params[:chat_ids] || fallback_ids).map(&:to_i).uniq
+        sync = ensure_session!.sync_messages_for_chats(
+          chat_ids:,
+          limit_per_chat: params[:message_limit],
+          wait_seconds: params[:wait_seconds]
+        )
+        render json: account_snapshot(@account.reload).merge(message_sync: sync, chat_ids:)
+      end
+
       private
 
       def find_account
@@ -81,11 +113,26 @@ module Api
           session_id: account.uuid,
           state: account.state,
           me: account.me_payload.presence,
+          profile: profile_snapshot(account.profile),
           error: account.last_error,
           enabled: account.enabled,
           use_test_dc: account.use_test_dc,
           connected_at: account.connected_at,
+          chat_count: account.telegram_chats.size,
           updated_at: account.updated_at
+        }
+      end
+
+      def profile_snapshot(profile)
+        return nil unless profile
+
+        {
+          td_user_id: profile.td_user_id,
+          username: profile.username,
+          first_name: profile.first_name,
+          last_name: profile.last_name,
+          phone_number: profile.phone_number,
+          watched_chat_ids: profile.watched_chat_ids
         }
       end
 

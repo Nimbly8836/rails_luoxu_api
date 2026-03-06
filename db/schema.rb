@@ -10,9 +10,53 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_03_05_083000) do
+ActiveRecord::Schema[8.0].define(version: 2026_03_06_170000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "system_user_chat_accesses", force: :cascade do |t|
+    t.bigint "system_user_id", null: false
+    t.bigint "td_chat_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["system_user_id", "td_chat_id"], name: "index_system_user_chat_accesses_on_user_id_and_td_chat_id", unique: true
+    t.index ["system_user_id"], name: "index_system_user_chat_accesses_on_system_user_id"
+    t.index ["td_chat_id"], name: "index_system_user_chat_accesses_on_td_chat_id"
+  end
+
+  create_table "system_users", force: :cascade do |t|
+    t.string "password_digest", null: false
+    t.string "api_token", null: false
+    t.boolean "active", default: true, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.boolean "admin", default: false, null: false
+    t.string "username", null: false
+    t.index ["admin"], name: "index_system_users_on_admin"
+    t.index ["api_token"], name: "index_system_users_on_api_token", unique: true
+    t.index ["username"], name: "index_system_users_on_username", unique: true
+  end
+
+  create_table "telegram_account_profiles", force: :cascade do |t|
+    t.bigint "telegram_account_id", null: false
+    t.bigint "td_user_id"
+    t.string "username"
+    t.string "first_name"
+    t.string "last_name"
+    t.string "phone_number"
+    t.string "language_code"
+    t.boolean "is_verified"
+    t.boolean "is_premium"
+    t.boolean "is_support"
+    t.boolean "is_scam"
+    t.boolean "is_fake"
+    t.jsonb "watched_chat_ids", default: [], null: false
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["td_user_id"], name: "index_telegram_account_profiles_on_td_user_id"
+    t.index ["telegram_account_id"], name: "index_telegram_account_profiles_on_telegram_account_id", unique: true
+  end
 
   create_table "telegram_accounts", force: :cascade do |t|
     t.string "uuid", null: false
@@ -33,8 +77,57 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_05_083000) do
     t.datetime "disabled_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.integer "known_chat_count"
     t.index ["enabled"], name: "index_telegram_accounts_on_enabled"
     t.index ["state"], name: "index_telegram_accounts_on_state"
     t.index ["uuid"], name: "index_telegram_accounts_on_uuid", unique: true
   end
+
+  create_table "telegram_chats", force: :cascade do |t|
+    t.bigint "telegram_account_id", null: false
+    t.bigint "td_chat_id", null: false
+    t.string "title", null: false
+    t.string "chat_type"
+    t.bigint "avatar_small_file_id"
+    t.bigint "avatar_big_file_id"
+    t.string "avatar_small_remote_id"
+    t.string "avatar_big_remote_id"
+    t.string "avatar_small_local_path"
+    t.string "avatar_big_local_path"
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "synced_at", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["synced_at"], name: "index_telegram_chats_on_synced_at"
+    t.index ["td_chat_id"], name: "index_telegram_chats_on_td_chat_id"
+    t.index ["telegram_account_id", "td_chat_id"], name: "index_telegram_chats_on_telegram_account_id_and_td_chat_id", unique: true
+    t.index ["telegram_account_id"], name: "index_telegram_chats_on_telegram_account_id"
+  end
+
+  create_table "telegram_messages", force: :cascade do |t|
+    t.bigint "telegram_account_id", null: false
+    t.bigint "td_chat_id", null: false
+    t.bigint "td_message_id", null: false
+    t.bigint "td_sender_id"
+    t.datetime "message_at", null: false
+    t.text "text"
+    t.string "sender_name"
+    t.index ["message_at"], name: "index_telegram_messages_on_message_at"
+    t.index ["td_chat_id"], name: "index_telegram_messages_on_td_chat_id"
+    t.index ["telegram_account_id", "td_chat_id", "td_message_id"], name: "index_telegram_messages_on_account_chat_message", unique: true
+    t.index ["telegram_account_id"], name: "index_telegram_messages_on_telegram_account_id"
+  end
+
+  create_table "usernames", force: :cascade do |t|
+    t.bigint "uid", null: false
+    t.bigint "group_id", null: false
+    t.text "name", null: false
+    t.datetime "last_seen", null: false
+    t.index ["uid", "group_id"], name: "index_usernames_on_uid_and_group_id", unique: true
+  end
+
+  add_foreign_key "system_user_chat_accesses", "system_users"
+  add_foreign_key "telegram_account_profiles", "telegram_accounts"
+  add_foreign_key "telegram_chats", "telegram_accounts"
+  add_foreign_key "telegram_messages", "telegram_accounts"
 end

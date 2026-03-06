@@ -6,12 +6,21 @@ Rails.application.routes.draw do
   get "up" => "rails/health#show", as: :rails_health_check
 
   namespace :api do
+    post "auth/register" => "auth#register"
+    post "auth/login" => "auth#login"
+    get "me/chats" => "me#chats"
+    get "me/search/messages" => "me#search_messages"
+
     namespace :telegram do
+      resources :chats, only: %i[index], controller: "chats"
       resources :sessions, only: %i[index create show destroy], controller: "sessions" do
         member do
           post :phone
           post :code
           post :password
+          patch :watch_targets
+          post :sync_chats
+          post :sync_messages
         end
       end
     end
