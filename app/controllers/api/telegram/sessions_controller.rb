@@ -54,9 +54,10 @@ module Api
         profile = TelegramAccountProfile.find_or_initialize_by(telegram_account_id: @account.id)
         profile.watched_chat_ids = chat_ids
         profile.save!
+        full_sync = ActiveModel::Type::Boolean.new.cast(params[:full_sync])
         sync = ensure_session!.sync_messages_for_chats(
           chat_ids:,
-          limit_per_chat: params[:message_limit],
+          limit_per_chat: full_sync ? nil : params[:message_limit],
           wait_seconds: params[:wait_seconds]
         )
         render json: account_snapshot(@account.reload).merge(message_sync: sync)
