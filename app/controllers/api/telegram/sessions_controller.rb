@@ -4,7 +4,7 @@ module Api
   module Telegram
     class SessionsController < ApplicationController
       before_action :authenticate_system_user!
-      before_action :find_account, only: %i[show phone code password destroy watch_targets sync_chats sync_messages]
+      before_action :find_account, only: %i[show phone code password destroy watch_targets sync_chats sync_messages sync_group_members]
 
       rescue_from ::Telegram::TdSession::InvalidStateError, with: :render_invalid_state
 
@@ -60,13 +60,13 @@ module Api
           limit_per_chat: full_sync ? nil : params[:message_limit],
           wait_seconds: params[:wait_seconds]
         )
-        render json: account_snapshot(@account.reload).merge(message_sync: sync)
+        render json: { session_id: @account.uuid, watched_chat_ids: chat_ids, message_sync: sync }
       end
 
       def sync_chats
         session = ensure_session!
         sync_result = session.sync_chats_now(limit: params[:limit])
-        render json: account_snapshot(@account.reload).merge(sync: sync_result)
+        render json: { session_id: @account.uuid, sync: sync_result }
       end
 
       def sync_messages
@@ -78,7 +78,15 @@ module Api
           limit_per_chat: params[:message_limit],
           wait_seconds: params[:wait_seconds]
         )
-        render json: account_snapshot(@account.reload).merge(message_sync: sync, chat_ids:)
+        render json: { session_id: @account.uuid, chat_ids:, message_sync: sync }
+      end
+
+      def sync_group_members
+        profile = TelegramAccountProfile.find_by(telegram_account_id: @account.id)
+        fallback_ids = profile&.watched_chat_ids
+        chat_ids = Array(params[:chat_ids] || fallback_ids).map(&:to_i).uniq
+        sync = ensure_session!.sync_group_members_for_chats(chat_ids:)
+        render json: { session_id: @account.uuid, chat_ids:, group_member_sync: sync }
       end
 
       private

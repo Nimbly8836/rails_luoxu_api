@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "base64"
+
 module Api
   class MeController < ApplicationController
     before_action :authenticate_system_user!
@@ -10,6 +12,26 @@ module Api
       grouped = rows.group_by(&:td_chat_id)
 
       render json: grouped.values.map { |entries| serialize_chat(entries.first, entries.size) }
+    end
+
+    def chat
+      chat_id = permitted_chat_id
+      return head :forbidden if chat_id.nil?
+
+      refresh_chat(chat_id)
+      rows = TelegramChat.where(td_chat_id: chat_id).order(:telegram_account_id)
+      return head :not_found if rows.empty?
+
+      render json: serialize_chat(rows.first, rows.size)
+    end
+
+    def chat_members
+      chat_id = permitted_chat_id
+      return head :forbidden if chat_id.nil?
+
+      refresh_chat_members(chat_id)
+      members = TelegramChatUsername.where(group_id: chat_id).where("uid > 0").order(last_seen: :desc, uid: :asc)
+      render json: members.map { |member| serialize_member(member) }
     end
 
     def search_messages
@@ -49,11 +71,16 @@ module Api
                  .offset(offset)
                  .limit(per_page)
 
+      member_map = TelegramChatUsername.where(
+        group_id: messages.map(&:td_chat_id).uniq,
+        uid: messages.map(&:td_sender_id).compact.uniq
+      ).index_by { |row| [row.group_id, row.uid] }
+
       render json: {
         page:,
         per_page:,
         total:,
-        items: messages.map { |m| serialize_message(m).merge(highlight: m.try(:highlight)) }
+        items: messages.map { |m| serialize_message(m, member_map).merge(highlight: m.try(:highlight)) }
       }
     end
 
@@ -64,22 +91,146 @@ module Api
         td_chat_id: chat.td_chat_id,
         title: chat.title,
         chat_type: chat.chat_type,
-        avatar_small_remote_id: chat.avatar_small_remote_id,
-        avatar_big_remote_id: chat.avatar_big_remote_id,
+        avatar_small_content_type: chat.avatar_small_content_type,
+        avatar_small_base64: base64_blob(chat.avatar_small_data),
         source_session_id: chat.telegram_account.uuid,
         source_count: source_count
       }
     end
 
-    def serialize_message(message)
+    def serialize_message(message, member_map)
+      member = member_map[[message.td_chat_id, message.td_sender_id]]
+
       {
         td_chat_id: message.td_chat_id,
         td_message_id: message.td_message_id,
         text: message.text,
         sender_id: message.td_sender_id,
-        sender_name: message.sender_name,
+        sender_name: member&.name.presence || message.sender_name,
+        sender_username: member&.username,
+        sender_avatar_small_content_type: member&.avatar_small_content_type,
+        sender_avatar_small_base64: base64_blob(member&.avatar_small_data),
         message_at: message.message_at
       }
+    end
+
+    def serialize_member(member)
+      {
+        uid: member.uid,
+        group_id: member.group_id,
+        name: member.name,
+        username: member.username,
+        last_seen: member.last_seen,
+        avatar_small_content_type: member.avatar_small_content_type,
+        avatar_small_base64: base64_blob(member.avatar_small_data)
+      }
+    end
+
+    def base64_blob(blob)
+      return nil if blob.blank?
+
+      Base64.strict_encode64(blob)
+    end
+
+    def refresh_chat_members(chat_id)
+      sessions = chat_sessions(chat_id)
+      return if sessions.empty?
+
+      attempts = []
+      sessions.each do |session|
+        next unless session_ready_for_refresh?(session, chat_id)
+
+        begin
+          session.refresh_chat(chat_id:, refresh_avatar: true)
+          sync = session.sync_group_members_for_chats(chat_ids: [chat_id], refresh_avatars: true)
+          attempts << { session_id: session.id, sync: }
+          return if sync[:failed].to_i.zero?
+        rescue StandardError => e
+          attempts << { session_id: session.id, error: e.message }
+        end
+      end
+
+      Rails.logger.warn("Member sync attempts exhausted for chat #{chat_id}: #{attempts.inspect}")
+    rescue StandardError => e
+      Rails.logger.warn("Failed refreshing members for chat #{chat_id}: #{e.message}")
+    end
+
+    def refresh_chat(chat_id)
+      sessions = chat_sessions(chat_id)
+      return if sessions.empty?
+
+      sessions.each do |session|
+        next unless session_ready_for_refresh?(session, chat_id)
+
+        session.refresh_chat(chat_id:, refresh_avatar: true)
+        return
+      rescue StandardError => e
+        Rails.logger.warn("Failed refreshing chat #{chat_id} with session #{session.id}: #{e.message}")
+      end
+    rescue StandardError => e
+      Rails.logger.warn("Failed refreshing chat #{chat_id}: #{e.message}")
+    end
+
+    def session_ready_for_refresh?(session, chat_id)
+      state = session.wait_for_initial_state(timeout: 3)
+      if state == :initializing
+        session.wait_until_ready!(timeout: 20)
+        state = session.snapshot[:state]
+      end
+      return true if state == :ready
+
+      Rails.logger.info("Skip refresh for chat #{chat_id}: session state is #{state}")
+      false
+    rescue StandardError => e
+      Rails.logger.warn("Failed checking session state for chat #{chat_id}: #{e.message}")
+      false
+    end
+
+    def chat_session(chat_id)
+      chat_sessions(chat_id).first
+    end
+
+    def chat_sessions(chat_id)
+      account_ids = recent_message_account_ids(chat_id) + recent_chat_account_ids(chat_id)
+      account_ids = account_ids.map(&:to_i).uniq
+      return [] if account_ids.empty?
+
+      accounts_by_id = TelegramAccount.where(id: account_ids, enabled: true).index_by(&:id)
+
+      account_ids.filter_map do |account_id|
+        account = accounts_by_id[account_id]
+        next if account.nil?
+
+        ::Telegram::Runtime.fetch(account.uuid) || ::Telegram::Runtime.start(account)
+      rescue StandardError => e
+        Rails.logger.warn("Failed starting session for account #{account_id}: #{e.message}")
+        nil
+      end
+    end
+
+    def recent_message_account_ids(chat_id)
+      TelegramMessage.joins(:telegram_account)
+                     .where(td_chat_id: chat_id, telegram_accounts: { enabled: true })
+                     .group("telegram_messages.telegram_account_id")
+                     .order(Arel.sql("MAX(telegram_messages.message_at) DESC"))
+                     .pluck("telegram_messages.telegram_account_id")
+    end
+
+    def recent_chat_account_ids(chat_id)
+      chat = TelegramChat.includes(:telegram_account)
+                         .where(td_chat_id: chat_id)
+                         .where(telegram_accounts: { enabled: true })
+                         .references(:telegram_account)
+                         .order(updated_at: :desc)
+      chat.pluck(:telegram_account_id)
+    end
+
+    def permitted_chat_id
+      chat_id = params.require(:chat_id).to_i
+      permitted_ids = current_system_user.chat_accesses.pluck(:td_chat_id)
+      return nil unless permitted_ids.include?(chat_id)
+
+      chat_id
     end
   end
 end

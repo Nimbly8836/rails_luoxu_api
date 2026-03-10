@@ -9,6 +9,8 @@ Rails.application.routes.draw do
     post "auth/register" => "auth#register"
     post "auth/login" => "auth#login"
     get "me/chats" => "me#chats"
+    get "me/chats/:chat_id" => "me#chat"
+    get "me/chats/:chat_id/members" => "me#chat_members"
     get "me/search/messages" => "me#search_messages"
 
     namespace :telegram do
@@ -21,6 +23,7 @@ Rails.application.routes.draw do
           patch :watch_targets
           post :sync_chats
           post :sync_messages
+          post :sync_group_members
         end
       end
     end

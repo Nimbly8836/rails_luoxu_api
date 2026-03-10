@@ -10,9 +10,10 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_03_06_170000) do
+ActiveRecord::Schema[8.0].define(version: 2026_03_10_121000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+  enable_extension "pgroonga"
 
   create_table "system_user_chat_accesses", force: :cascade do |t|
     t.bigint "system_user_id", null: false
@@ -83,6 +84,19 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_06_170000) do
     t.index ["uuid"], name: "index_telegram_accounts_on_uuid", unique: true
   end
 
+  create_table "telegram_chat_usernames", force: :cascade do |t|
+    t.bigint "uid", null: false
+    t.bigint "group_id", null: false
+    t.text "name", null: false
+    t.datetime "last_seen", null: false
+    t.string "username"
+    t.bigint "avatar_small_file_id"
+    t.binary "avatar_small_data"
+    t.string "avatar_small_content_type"
+    t.datetime "avatar_small_fetched_at"
+    t.index ["uid", "group_id"], name: "index_telegram_chat_usernames_on_uid_and_group_id", unique: true
+  end
+
   create_table "telegram_chats", force: :cascade do |t|
     t.bigint "telegram_account_id", null: false
     t.bigint "td_chat_id", null: false
@@ -90,14 +104,13 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_06_170000) do
     t.string "chat_type"
     t.bigint "avatar_small_file_id"
     t.bigint "avatar_big_file_id"
-    t.string "avatar_small_remote_id"
-    t.string "avatar_big_remote_id"
-    t.string "avatar_small_local_path"
-    t.string "avatar_big_local_path"
     t.jsonb "raw_payload", default: {}, null: false
     t.datetime "synced_at", null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.binary "avatar_small_data"
+    t.string "avatar_small_content_type"
+    t.datetime "avatar_small_fetched_at"
     t.index ["synced_at"], name: "index_telegram_chats_on_synced_at"
     t.index ["td_chat_id"], name: "index_telegram_chats_on_td_chat_id"
     t.index ["telegram_account_id", "td_chat_id"], name: "index_telegram_chats_on_telegram_account_id_and_td_chat_id", unique: true
@@ -116,14 +129,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_06_170000) do
     t.index ["td_chat_id"], name: "index_telegram_messages_on_td_chat_id"
     t.index ["telegram_account_id", "td_chat_id", "td_message_id"], name: "index_telegram_messages_on_account_chat_message", unique: true
     t.index ["telegram_account_id"], name: "index_telegram_messages_on_telegram_account_id"
-  end
-
-  create_table "usernames", force: :cascade do |t|
-    t.bigint "uid", null: false
-    t.bigint "group_id", null: false
-    t.text "name", null: false
-    t.datetime "last_seen", null: false
-    t.index ["uid", "group_id"], name: "index_usernames_on_uid_and_group_id", unique: true
+    t.index ["text"], name: "message_idx", using: :pgroonga
   end
 
   add_foreign_key "system_user_chat_accesses", "system_users"
