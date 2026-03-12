@@ -191,12 +191,15 @@ GEM
     nio4r (2.7.5)
     nokogiri (1.19.1-arm64-darwin)
       racc (~> 1.4)
+    nokogiri (1.19.1-x86_64-linux-gnu)
+      racc (~> 1.4)
     ostruct (0.6.3)
     parallel (1.27.0)
     parser (3.3.10.2)
       ast (~> 2.4.1)
       racc
     pg (1.6.3-arm64-darwin)
+    pg (1.6.3-x86_64-linux)
     pp (0.6.3)
       prettyprint
     prettyprint (0.2.0)
@@ -321,6 +324,7 @@ GEM
       dry-types (~> 1.0)
     thor (1.5.0)
     thruster (0.1.18-arm64-darwin)
+    thruster (0.1.18-x86_64-linux)
     timeout (0.6.0)
     tsort (0.2.0)
     tzinfo (2.0.6)
@@ -338,6 +342,7 @@ GEM
 
 PLATFORMS
   arm64-darwin
+  x86_64-linux
 
 DEPENDENCIES
   bcrypt (~> 3.1.7)
