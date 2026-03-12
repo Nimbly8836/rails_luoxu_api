@@ -7,7 +7,7 @@ class SystemUser < ApplicationRecord
 
   validates :username, presence: true, uniqueness: true
   validates :api_token, presence: true, uniqueness: true
-  validates :admin, inclusion: { in: [true, false] }
+  validates :admin, inclusion: { in: [ true, false ] }
 
   before_validation :ensure_api_token, on: :create
 

@@ -42,7 +42,7 @@ module Api
       scope = TelegramChatUsername.where(group_id: chat_id).where("uid > 0")
       if query.present?
         uid = Integer(query, exception: false)
-        conditions = ["name &@~ :query OR username &@~ :query"]
+        conditions = [ "name &@~ :query OR username &@~ :query" ]
         bindings = { query: query }
         if uid
           conditions << "uid = :uid"
@@ -71,7 +71,7 @@ module Api
       offset = (page - 1) * per_page
 
       permitted_ids = current_system_user.chat_accesses.pluck(:td_chat_id)
-      permitted_ids &= [chat_id] if chat_id.present?
+      permitted_ids &= [ chat_id ] if chat_id.present?
       return render json: [] if permitted_ids.empty?
 
       scope = TelegramMessage.where(td_chat_id: permitted_ids)
@@ -89,11 +89,11 @@ module Api
       highlight_sql = if query.present?
                         ActiveRecord::Base.send(
                           :sanitize_sql_array,
-                          ["pgroonga_highlight_html(text, ARRAY[?]::text[]) AS highlight", query]
+                          [ "pgroonga_highlight_html(text, ARRAY[?]::text[]) AS highlight", query ]
                         )
-                      else
+      else
                         "NULL AS highlight"
-                      end
+      end
       messages = scope
                  .select("telegram_messages.*", highlight_sql)
                  .order(message_at: :desc)
@@ -103,7 +103,7 @@ module Api
       member_map = TelegramChatUsername.where(
         group_id: messages.map(&:td_chat_id).uniq,
         uid: messages.map(&:td_sender_id).compact.uniq
-      ).index_by { |row| [row.group_id, row.uid] }
+      ).index_by { |row| [ row.group_id, row.uid ] }
 
       render json: {
         page:,
@@ -128,7 +128,7 @@ module Api
     end
 
     def serialize_message(message, member_map)
-      member = member_map[[message.td_chat_id, message.td_sender_id]]
+      member = member_map[[ message.td_chat_id, message.td_sender_id ]]
       post_id = telegram_post_id(message.td_message_id)
       channel_id = telegram_privatepost_channel_id(message.td_chat_id)
       privatepost_url = build_privatepost_url(channel_id:, post_id:)
@@ -210,7 +210,7 @@ module Api
 
         begin
           session.refresh_chat(chat_id:, refresh_avatar: true)
-          sync = session.sync_group_members_for_chats(chat_ids: [chat_id], refresh_avatars: true)
+          sync = session.sync_group_members_for_chats(chat_ids: [ chat_id ], refresh_avatars: true)
           attempts << { session_id: session.id, sync: }
           return if sync[:failed].to_i.zero?
         rescue StandardError => e

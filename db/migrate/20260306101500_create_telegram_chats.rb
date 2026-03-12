@@ -20,7 +20,7 @@ class CreateTelegramChats < ActiveRecord::Migration[8.0]
     end
 
     add_index :telegram_chats, :td_chat_id
-    add_index :telegram_chats, [:telegram_account_id, :td_chat_id], unique: true
+    add_index :telegram_chats, [ :telegram_account_id, :td_chat_id ], unique: true
     add_index :telegram_chats, :synced_at
   end
 end

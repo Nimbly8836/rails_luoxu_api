@@ -20,10 +20,10 @@ namespace :api do
       verb = verb.is_a?(Regexp) ? verb.source : verb.to_s
       verb = verb.gsub("^", "").gsub("$", "")
       path = route.path.spec.to_s
-      rows << [verb, path, "#{controller}##{action}"]
+      rows << [ verb, path, "#{controller}##{action}" ]
     end
 
-    rows.sort_by! { |verb, path, _| [path, verb] }
+    rows.sort_by! { |verb, path, _| [ path, verb ] }
 
     content = +"# API Routes\n\n"
     content << "Generated at: #{Time.now.utc.iso8601}\n\n"

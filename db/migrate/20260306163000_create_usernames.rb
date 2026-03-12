@@ -9,6 +9,6 @@ class CreateUsernames < ActiveRecord::Migration[8.0]
       t.datetime :last_seen, null: false
     end
 
-    add_index :usernames, [:uid, :group_id], unique: true, name: "index_usernames_on_uid_and_group_id"
+    add_index :usernames, [ :uid, :group_id ], unique: true, name: "index_usernames_on_uid_and_group_id"
   end
 end

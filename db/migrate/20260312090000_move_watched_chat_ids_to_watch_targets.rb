@@ -7,7 +7,7 @@ class MoveWatchedChatIdsToWatchTargets < ActiveRecord::Migration[8.0]
       t.bigint :td_chat_id, null: false
       t.timestamps
     end
-    add_index :telegram_account_watch_targets, [:telegram_account_id, :td_chat_id], unique: true,
+    add_index :telegram_account_watch_targets, [ :telegram_account_id, :td_chat_id ], unique: true,
               name: "index_telegram_account_watch_targets_on_account_and_chat"
     add_index :telegram_account_watch_targets, :td_chat_id
 

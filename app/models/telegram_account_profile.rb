@@ -39,18 +39,18 @@ class TelegramAccountProfile < ApplicationRecord
     rows = TelegramChat.where(td_chat_id: ids).distinct.pluck(:telegram_account_id, :td_chat_id)
     return {} if rows.empty?
 
-    pairs = rows.map { |account_id, td_chat_id| [account_id.to_i, td_chat_id.to_i] }
+    pairs = rows.map { |account_id, td_chat_id| [ account_id.to_i, td_chat_id.to_i ] }
     account_ids = pairs.map(&:first).uniq
     td_chat_ids = pairs.map(&:last).uniq
     existing_pairs = TelegramAccountWatchTarget.where(
       telegram_account_id: account_ids,
       td_chat_id: td_chat_ids
-    ).pluck(:telegram_account_id, :td_chat_id).map { |account_id, td_chat_id| [account_id.to_i, td_chat_id.to_i] }
+    ).pluck(:telegram_account_id, :td_chat_id).map { |account_id, td_chat_id| [ account_id.to_i, td_chat_id.to_i ] }
     existing_set = existing_pairs.each_with_object({}) { |pair, memo| memo[pair] = true }
 
     added_by_account = Hash.new { |hash, key| hash[key] = [] }
     payload = pairs.each_with_object([]) do |(account_id, td_chat_id), memo|
-      next if existing_set[[account_id, td_chat_id]]
+      next if existing_set[[ account_id, td_chat_id ]]
 
       added_by_account[account_id] << td_chat_id
       memo << {

@@ -15,7 +15,7 @@ class CreateTelegramMessages < ActiveRecord::Migration[8.0]
       t.timestamps
     end
 
-    add_index :telegram_messages, [:telegram_account_id, :td_chat_id, :td_message_id], unique: true,
+    add_index :telegram_messages, [ :telegram_account_id, :td_chat_id, :td_message_id ], unique: true,
               name: "index_telegram_messages_on_account_chat_message"
     add_index :telegram_messages, :td_chat_id
     add_index :telegram_messages, :message_at

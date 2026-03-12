@@ -5,7 +5,7 @@ require "rack/mime"
 module Telegram
   class TdSession
     class InvalidStateError < StandardError; end
-    WATCHED_CHAT_IDS_CACHE_TTL_SECONDS = [ENV.fetch("TELEGRAM_WATCHED_CHAT_IDS_CACHE_TTL_SECONDS", "5").to_f, 0.5].max
+    WATCHED_CHAT_IDS_CACHE_TTL_SECONDS = [ ENV.fetch("TELEGRAM_WATCHED_CHAT_IDS_CACHE_TTL_SECONDS", "5").to_f, 0.5 ].max
 
     attr_reader :id
 
@@ -553,7 +553,7 @@ module Telegram
 
       if chat_ids.empty?
         begin
-          offline = @client.search_chats(query: "", limit: [limit, 100].min).value!
+          offline = @client.search_chats(query: "", limit: [ limit, 100 ].min).value!
           offline_ids = extract_chat_ids(offline)
           result[:from_search_chats] = offline_ids.size
           chat_ids |= offline_ids
@@ -562,7 +562,7 @@ module Telegram
         end
 
         begin
-          server = @client.search_chats_on_server(query: "", limit: [limit, 100].min).value!
+          server = @client.search_chats_on_server(query: "", limit: [ limit, 100 ].min).value!
           server_ids = extract_chat_ids(server)
           result[:from_search_chats_on_server] = server_ids.size
           chat_ids |= server_ids
@@ -631,7 +631,7 @@ module Telegram
       attrs = extract_chat_attrs(chat, include_avatar_blob:, existing_record:)
       return false if attrs.nil?
 
-      upsert_chat_records_bulk([attrs], synced_at:) > 0
+      upsert_chat_records_bulk([ attrs ], synced_at:) > 0
     end
 
     def upsert_chat_records_bulk(attrs_list, synced_at:)
@@ -693,8 +693,8 @@ module Telegram
       payload = bundle[:message]
       return unless watched_chat_id?(payload[:td_chat_id])
 
-      upsert_usernames_from([bundle])
-      upsert_messages_bulk([payload])
+      upsert_usernames_from([ bundle ])
+      upsert_messages_bulk([ payload ])
     end
 
     def watched_chat_ids
@@ -879,7 +879,7 @@ module Telegram
       return if rows.empty?
 
       # keep the latest last_seen per (uid, group_id)
-      dedup = rows.group_by { |r| [r[:uid], r[:group_id]] }.map do |_k, v|
+      dedup = rows.group_by { |r| [ r[:uid], r[:group_id] ] }.map do |_k, v|
         v.max_by { |row| row[:last_seen] }
       end
 
@@ -1161,8 +1161,8 @@ module Telegram
 
       if chat.respond_to?(:type)
         chat_type = chat.type
-        return [:supergroup, chat_type.supergroup_id] if defined?(TD::Types::ChatType::Supergroup) && chat_type.is_a?(TD::Types::ChatType::Supergroup)
-        return [:basic_group, chat_type.basic_group_id] if defined?(TD::Types::ChatType::BasicGroup) && chat_type.is_a?(TD::Types::ChatType::BasicGroup)
+        return [ :supergroup, chat_type.supergroup_id ] if defined?(TD::Types::ChatType::Supergroup) && chat_type.is_a?(TD::Types::ChatType::Supergroup)
+        return [ :basic_group, chat_type.basic_group_id ] if defined?(TD::Types::ChatType::BasicGroup) && chat_type.is_a?(TD::Types::ChatType::BasicGroup)
       end
 
       raw =
@@ -1184,11 +1184,11 @@ module Telegram
         when "chatTypeSupergroup"
           group_id = type["supergroup_id"] || type[:supergroup_id]
           group_id ||= supergroup_id_from_chat_id(chat_id)
-          return [:supergroup, group_id]
+          return [ :supergroup, group_id ]
         when "chatTypeBasicGroup"
           group_id = type["basic_group_id"] || type[:basic_group_id]
           group_id ||= basic_group_id_from_chat_id(chat_id)
-          return [:basic_group, group_id]
+          return [ :basic_group, group_id ]
         end
       elsif type.respond_to?(:to_h)
         parsed = type.to_h
@@ -1196,25 +1196,25 @@ module Telegram
         case type_name
         when "chatTypeSupergroup"
           group_id = parsed["supergroup_id"] || supergroup_id_from_chat_id(chat_id)
-          return [:supergroup, group_id]
+          return [ :supergroup, group_id ]
         when "chatTypeBasicGroup"
           group_id = parsed["basic_group_id"] || basic_group_id_from_chat_id(chat_id)
-          return [:basic_group, group_id]
+          return [ :basic_group, group_id ]
         end
       elsif type.is_a?(String)
         case type
         when "chatTypeSupergroup"
           group_id = supergroup_id_from_chat_id(chat_id)
-          return [:supergroup, group_id]
+          return [ :supergroup, group_id ]
         when "chatTypeBasicGroup"
           group_id = basic_group_id_from_chat_id(chat_id)
-          return [:basic_group, group_id]
+          return [ :basic_group, group_id ]
         end
       end
 
-      [nil, nil]
+      [ nil, nil ]
     rescue StandardError
-      [nil, nil]
+      [ nil, nil ]
     end
 
     def chat_id_from(chat)
@@ -1716,7 +1716,7 @@ module Telegram
     end
 
     def build_display_name(payload)
-      full_name = [payload[:first_name], payload[:last_name]].compact.join(" ").strip
+      full_name = [ payload[:first_name], payload[:last_name] ].compact.join(" ").strip
       return full_name if full_name.present?
 
       payload[:username].presence

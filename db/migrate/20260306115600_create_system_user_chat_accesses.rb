@@ -9,7 +9,7 @@ class CreateSystemUserChatAccesses < ActiveRecord::Migration[8.0]
       t.timestamps
     end
 
-    add_index :system_user_chat_accesses, [:system_user_id, :td_chat_id], unique: true,
+    add_index :system_user_chat_accesses, [ :system_user_id, :td_chat_id ], unique: true,
               name: "index_system_user_chat_accesses_on_user_id_and_td_chat_id"
     add_index :system_user_chat_accesses, :td_chat_id
   end
