@@ -8,6 +8,8 @@ Rails.application.routes.draw do
   namespace :api do
     post "auth/register" => "auth#register"
     post "auth/login" => "auth#login"
+    get "auth/users" => "auth#users"
+    patch "auth/users/:id/chat_ids" => "auth#update_chat_ids"
     get "me/chats" => "me#chats"
     get "me/chats/:chat_id" => "me#chat"
     get "me/chats/:chat_id/members" => "me#chat_members"

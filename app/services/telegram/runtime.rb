@@ -11,7 +11,8 @@ module Telegram
 
         @booted = true
         TelegramAccount.where(enabled: true).find_each do |account|
-          start(account)
+          session = start(account)
+          session.boot_recovery_sync_async!
         rescue StandardError => e
           Rails.logger.error("Failed to boot Telegram account #{account.uuid}: #{e.message}")
         end

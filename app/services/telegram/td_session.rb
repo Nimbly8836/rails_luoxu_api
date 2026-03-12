@@ -5,6 +5,7 @@ require "rack/mime"
 module Telegram
   class TdSession
     class InvalidStateError < StandardError; end
+    WATCHED_CHAT_IDS_CACHE_TTL_SECONDS = [ENV.fetch("TELEGRAM_WATCHED_CHAT_IDS_CACHE_TTL_SECONDS", "5").to_f, 0.5].max
 
     attr_reader :id
 
@@ -19,16 +20,73 @@ module Telegram
       @last_error = nil
       @disposed = false
       @sender_name_cache = {}
+      @watched_chat_ids_cache = {}
+      @watched_chat_ids_cache_loaded_at = 0.0
+      @boot_recovery_sync_enqueued = false
+      @watched_chat_sync_running = false
 
       @client = TD::Client.new(**client_config(account))
       subscribe_updates
       @client.connect
     end
 
+    def invalidate_watched_chat_ids_cache!
+      @mutex.synchronize do
+        @watched_chat_ids_cache = {}
+        @watched_chat_ids_cache_loaded_at = 0.0
+      end
+    end
+
+    def boot_recovery_sync_async!
+      should_enqueue = @mutex.synchronize do
+        next false if @boot_recovery_sync_enqueued
+
+        @boot_recovery_sync_enqueued = true
+      end
+      return unless should_enqueue
+
+      sync_messages_for_watched_chats_async(reason: "boot")
+    end
+
+    def sync_messages_for_watched_chats_async(reason: "manual")
+      should_start = @mutex.synchronize do
+        next false if @watched_chat_sync_running
+
+        @watched_chat_sync_running = true
+      end
+      return unless should_start
+
+      Thread.new do
+        begin
+          state = wait_for_initial_state(timeout: 5)
+          wait_until_ready!(timeout: 30) if state == :initializing
+
+          current_state = snapshot[:state]
+          unless current_state == :ready
+            Rails.logger.info("Skip watched chat sync(#{reason}) for account #{@id}: state=#{current_state}")
+            next
+          end
+
+          chat_ids = watched_chat_ids
+          if chat_ids.empty?
+            Rails.logger.info("Skip watched chat sync(#{reason}) for account #{@id}: no watched chats")
+            next
+          end
+
+          sync = sync_messages_for_chats(chat_ids:)
+          Rails.logger.info("Watched chat sync(#{reason}) for account #{@id}: #{sync.inspect}")
+        rescue StandardError => e
+          Rails.logger.warn("Failed watched chat sync(#{reason}) for account #{@id}: #{e.message}")
+        ensure
+          @mutex.synchronize { @watched_chat_sync_running = false }
+        end
+      end
+    end
+
     def submit_phone(phone_number:)
       raise_if_disposed!
       ensure_state!(:wait_phone_number)
-      @client.set_authentication_phone_number(phone_number:, settings: nil).wait
+      @client.set_authentication_phone_number(phone_number:, settings: nil).value!
       persist_account(phone_number:)
       snapshot
     rescue StandardError => e
@@ -53,7 +111,7 @@ module Telegram
     def submit_code(code:)
       raise_if_disposed!
       ensure_state!(:wait_code)
-      @client.check_authentication_code(code:).wait
+      @client.check_authentication_code(code:).value!
       snapshot
     rescue StandardError => e
       capture_error(e)
@@ -63,7 +121,7 @@ module Telegram
     def submit_password(password:)
       raise_if_disposed!
       ensure_state!(:wait_password)
-      @client.check_authentication_password(password:).wait
+      @client.check_authentication_password(password:).value!
       snapshot
     rescue StandardError => e
       capture_error(e)
@@ -136,11 +194,11 @@ module Telegram
         first_response_info = nil
 
         begin
-          chat = @client.get_chat(chat_id:).wait
+          chat = @client.get_chat(chat_id:).value!
           payload = extract_chat_payload(chat)
           chat_title = payload&.dig(:title)
           last_message_id = extract_chat_last_message_id(chat)
-          @client.open_chat(chat_id:).wait
+          @client.open_chat(chat_id:).value!
           sleep(delay) if delay.positive?
         rescue StandardError => e
           precheck_error = e.message
@@ -279,7 +337,7 @@ module Telegram
       wait_until_ready!
 
       existing_chat = TelegramChat.find_by(telegram_account_id: @account_id, td_chat_id: chat_id.to_i)
-      chat = @client.get_chat(chat_id: chat_id).wait
+      chat = @client.get_chat(chat_id: chat_id).value!
       upsert_chat_record(chat, include_avatar_blob: refresh_avatar, existing_record: existing_chat)
     end
 
@@ -373,7 +431,7 @@ module Telegram
     end
 
     def probe_ready_state!
-      @client.get_me.wait
+      @client.get_me.value!
       true
     rescue StandardError
       false
@@ -382,7 +440,7 @@ module Telegram
     def fetch_me
       @client.get_me.then { |user| @mutex.synchronize { @me = user } }
         .rescue { |err| @mutex.synchronize { @last_error = err.to_s } }
-        .wait
+        .value!
       persist_me
     rescue StandardError => e
       @mutex.synchronize { @last_error = e.message }
@@ -495,7 +553,7 @@ module Telegram
 
       if chat_ids.empty?
         begin
-          offline = @client.search_chats(query: "", limit: [limit, 100].min).wait
+          offline = @client.search_chats(query: "", limit: [limit, 100].min).value!
           offline_ids = extract_chat_ids(offline)
           result[:from_search_chats] = offline_ids.size
           chat_ids |= offline_ids
@@ -504,7 +562,7 @@ module Telegram
         end
 
         begin
-          server = @client.search_chats_on_server(query: "", limit: [limit, 100].min).wait
+          server = @client.search_chats_on_server(query: "", limit: [limit, 100].min).value!
           server_ids = extract_chat_ids(server)
           result[:from_search_chats_on_server] = server_ids.size
           chat_ids |= server_ids
@@ -521,7 +579,7 @@ module Telegram
 
       attrs_buffer = []
       chat_ids.each do |chat_id|
-        chat = @client.get_chat(chat_id: chat_id).wait
+        chat = @client.get_chat(chat_id: chat_id).value!
         existing_chat = TelegramChat.find_by(telegram_account_id: @account_id, td_chat_id: chat_id.to_i)
         attrs = extract_chat_attrs(chat, existing_record: existing_chat)
         next if attrs.nil?
@@ -551,13 +609,13 @@ module Telegram
       ids = []
       5.times do
         begin
-          @client.load_chats(chat_list:, limit:).wait
+          @client.load_chats(chat_list:, limit:).value!
         rescue StandardError => e
           # 404 here usually means all chats already loaded; keep going.
           result[:errors] << "load_chats(#{label}): #{e.message}"
         end
 
-        chats = @client.get_chats(chat_list:, limit:).wait
+        chats = @client.get_chats(chat_list:, limit:).value!
         ids = extract_chat_ids(chats)
         break if ids.any?
 
@@ -633,15 +691,38 @@ module Telegram
       return if bundle.nil?
 
       payload = bundle[:message]
-      return unless watched_chat_ids.include?(payload[:td_chat_id])
+      return unless watched_chat_id?(payload[:td_chat_id])
 
       upsert_usernames_from([bundle])
       upsert_messages_bulk([payload])
     end
 
     def watched_chat_ids
-      raw = TelegramAccountProfile.where(telegram_account_id: @account_id).pick(:watched_chat_ids)
-      Array(raw).map(&:to_i).uniq
+      watched_chat_ids_lookup.keys
+    end
+
+    def watched_chat_id?(chat_id)
+      watched_chat_ids_lookup.key?(chat_id.to_i)
+    end
+
+    def watched_chat_ids_lookup
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      cached = @mutex.synchronize do
+        if @watched_chat_ids_cache_loaded_at.positive? &&
+           (now - @watched_chat_ids_cache_loaded_at) < WATCHED_CHAT_IDS_CACHE_TTL_SECONDS
+          @watched_chat_ids_cache
+        end
+      end
+      return cached unless cached.nil?
+
+      ids = TelegramAccountWatchTarget.where(telegram_account_id: @account_id).pluck(:td_chat_id).map(&:to_i).uniq
+      lookup = ids.each_with_object({}) { |id, memo| memo[id] = true }
+
+      @mutex.synchronize do
+        @watched_chat_ids_cache = lookup
+        @watched_chat_ids_cache_loaded_at = now
+      end
+      lookup
     end
 
     def extract_history_messages(response)
@@ -840,7 +921,7 @@ module Telegram
     end
 
     def fetch_user_name(user_id)
-      user = @client.get_user(user_id:).wait
+      user = @client.get_user(user_id:).value!
       payload = extract_user_payload(user)
       return nil if payload.nil?
 
@@ -853,7 +934,7 @@ module Telegram
       title = TelegramChat.where(telegram_account_id: @account_id, td_chat_id: chat_id).pick(:title)
       return title if title.present?
 
-      chat = @client.get_chat(chat_id:).wait
+      chat = @client.get_chat(chat_id:).value!
       extract_chat_payload(chat)&.dig(:title)
     rescue StandardError
       nil
@@ -911,6 +992,7 @@ module Telegram
       chat = fetch_chat_for_group_sync(chat_id)
       payload = build_group_sync_chat_payload(chat, existing_chat:, chat_id:, refresh_avatars:)
       source_chat = chat || chat_source_from_record(existing_chat, chat_id) || build_minimal_chat_source(chat_id, payload&.dig(:chat_type))
+      source_chat = resolve_td_value(source_chat)
       raise "Chat #{chat_id} not found" if payload.nil? || source_chat.nil?
 
       existing_members = TelegramChatUsername.where(group_id: chat_id).index_by(&:uid)
@@ -920,7 +1002,10 @@ module Telegram
           users_for_group_chat(source_chat)
         rescue StandardError => e
           member_resolution_error = "#{e.class}: #{e.message}"
-          Rails.logger.warn("Failed resolving group members for chat #{chat_id} on account #{@id}: #{member_resolution_error}")
+          Rails.logger.warn(
+            "Failed resolving group members for chat #{chat_id} on account #{@id}: #{member_resolution_error}; "\
+            "source=#{describe_group_source_chat(source_chat)}; #{td_stack_versions}"
+          )
           []
         end
 
@@ -977,7 +1062,7 @@ module Telegram
     end
 
     def fetch_chat_for_group_sync(chat_id)
-      @client.get_chat(chat_id:).wait
+      @client.get_chat(chat_id:).value!
     rescue StandardError => e
       Rails.logger.warn("get_chat failed for group sync chat #{chat_id} on account #{@id}: #{e.message}")
       nil
@@ -1059,6 +1144,7 @@ module Telegram
     end
 
     def users_for_group_chat(chat)
+      chat = resolve_td_value(chat)
       kind, group_id = extract_group_target(chat)
       raise "Chat #{chat_id_from(chat)} is not a group" if kind.nil? || group_id.to_i <= 0
 
@@ -1207,7 +1293,7 @@ module Telegram
           filter: TD::Types::SupergroupMembersFilter::Recent.new,
           offset:,
           limit:
-        ).wait
+        ).value!
         chunk =
           if response.respond_to?(:members)
             Array(response.members)
@@ -1230,7 +1316,7 @@ module Telegram
     end
 
     def basic_group_members(basic_group_id)
-      full_info = @client.get_basic_group_full_info(basic_group_id:).wait
+      full_info = @client.get_basic_group_full_info(basic_group_id:).value!
       members =
         if full_info.respond_to?(:members)
           Array(full_info.members)
@@ -1246,7 +1332,7 @@ module Telegram
     end
 
     def fetch_user_with_avatar(user_id)
-      @client.get_user(user_id:).wait
+      @client.get_user(user_id:).value!
     rescue StandardError
       nil
     end
@@ -1560,7 +1646,7 @@ module Telegram
 
     def ensure_file_downloaded(file)
       file_id = file_id_from(file).to_i
-      file_obj = file.respond_to?(:local) ? file : @client.get_file(file_id:).wait
+      file_obj = file.respond_to?(:local) ? file : @client.get_file(file_id:).value!
       local = file_obj.respond_to?(:local) ? file_obj.local : nil
       return file_obj if local&.is_downloading_completed && local.path.present?
 
@@ -1570,7 +1656,29 @@ module Telegram
         offset: 0,
         limit: 0,
         synchronous: true
-      ).wait
+      ).value!
+    end
+
+    def resolve_td_value(value)
+      return value unless value.respond_to?(:value!) && value.respond_to?(:wait)
+
+      value.value!
+    end
+
+    def describe_group_source_chat(chat)
+      {
+        class: chat.class.to_s,
+        chat_id: chat_id_from(chat),
+        target: extract_group_target(chat)
+      }
+    rescue StandardError
+      { class: chat.class.to_s }
+    end
+
+    def td_stack_versions
+      ruby_version = Gem.loaded_specs["tdlib-ruby"]&.version&.to_s || "unknown"
+      schema_version = Gem.loaded_specs["tdlib-schema"]&.version&.to_s || "unknown"
+      "tdlib-ruby=#{ruby_version} tdlib-schema=#{schema_version}"
     end
 
     def extract_photo_file(photo, size)

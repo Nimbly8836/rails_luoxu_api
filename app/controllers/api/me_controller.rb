@@ -6,6 +6,9 @@ module Api
   class MeController < ApplicationController
     before_action :authenticate_system_user!
 
+    TDLIB_MESSAGE_ID_SHIFT = 20
+    TD_SUPERGROUP_CHAT_ABS_PREFIX = 1_000_000_000_000
+
     def chats
       permitted_ids = current_system_user.chat_accesses.pluck(:td_chat_id)
       rows = TelegramChat.where(td_chat_id: permitted_ids).order(:td_chat_id, :telegram_account_id)
@@ -28,15 +31,40 @@ module Api
     def chat_members
       chat_id = permitted_chat_id
       return head :forbidden if chat_id.nil?
+      query = params[:q].to_s.strip
+
+      page = params[:page].to_i
+      page = 1 if page < 1
+      per_page = (params[:per_page] || params[:limit] || 20).to_i.clamp(1, 200)
+      offset = (page - 1) * per_page
 
       refresh_chat_members(chat_id)
-      members = TelegramChatUsername.where(group_id: chat_id).where("uid > 0").order(last_seen: :desc, uid: :asc)
-      render json: members.map { |member| serialize_member(member) }
+      scope = TelegramChatUsername.where(group_id: chat_id).where("uid > 0")
+      if query.present?
+        uid = Integer(query, exception: false)
+        conditions = ["name &@~ :query OR username &@~ :query"]
+        bindings = { query: query }
+        if uid
+          conditions << "uid = :uid"
+          bindings[:uid] = uid
+        end
+        scope = scope.where(conditions.join(" OR "), bindings)
+      end
+      total = scope.count
+      members = scope.order(last_seen: :desc, uid: :asc).offset(offset).limit(per_page)
+
+      render json: {
+        page:,
+        per_page:,
+        total:,
+        items: members.map { |member| serialize_member(member) }
+      }
     end
 
     def search_messages
       query = params.require(:q).to_s.strip
       chat_id = params[:chat_id].to_i if params[:chat_id].present?
+      user_ids = normalize_integer_list(params[:user_ids])
       page = params[:page].to_i
       page = 1 if page < 1
       per_page = (params[:per_page] || params[:limit] || 50).to_i.clamp(1, 200)
@@ -47,6 +75,7 @@ module Api
       return render json: [] if permitted_ids.empty?
 
       scope = TelegramMessage.where(td_chat_id: permitted_ids)
+      scope = scope.where(td_sender_id: user_ids) if user_ids.any?
       if query.present?
         mode = params[:mode].to_s
         if mode == "regex"
@@ -100,10 +129,16 @@ module Api
 
     def serialize_message(message, member_map)
       member = member_map[[message.td_chat_id, message.td_sender_id]]
+      post_id = telegram_post_id(message.td_message_id)
+      channel_id = telegram_privatepost_channel_id(message.td_chat_id)
+      privatepost_url = build_privatepost_url(channel_id:, post_id:)
 
       {
         td_chat_id: message.td_chat_id,
         td_message_id: message.td_message_id,
+        message_id: post_id,
+        tg_privatepost_channel_id: channel_id,
+        tg_privatepost_url: privatepost_url,
         text: message.text,
         sender_id: message.td_sender_id,
         sender_name: member&.name.presence || message.sender_name,
@@ -130,6 +165,39 @@ module Api
       return nil if blob.blank?
 
       Base64.strict_encode64(blob)
+    end
+
+    def normalize_integer_list(raw_value)
+      Array(raw_value)
+        .flat_map { |value| value.to_s.split(",") }
+        .map(&:strip)
+        .reject(&:empty?)
+        .filter_map { |value| Integer(value, exception: false) }
+        .reject(&:zero?)
+        .uniq
+    end
+
+    def telegram_post_id(td_message_id)
+      message_id = td_message_id.to_i
+      return nil if message_id <= 0
+
+      message_id >> TDLIB_MESSAGE_ID_SHIFT
+    end
+
+    def telegram_privatepost_channel_id(td_chat_id)
+      chat_id_abs = td_chat_id.to_i.abs
+      return nil if chat_id_abs < TD_SUPERGROUP_CHAT_ABS_PREFIX
+
+      channel_id = chat_id_abs - TD_SUPERGROUP_CHAT_ABS_PREFIX
+      return nil if channel_id <= 0
+
+      channel_id
+    end
+
+    def build_privatepost_url(channel_id:, post_id:)
+      return nil if channel_id.nil? || post_id.nil?
+
+      "tg://privatepost?channel=#{channel_id}&post=#{post_id}"
     end
 
     def refresh_chat_members(chat_id)

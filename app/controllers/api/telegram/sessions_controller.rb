@@ -52,10 +52,12 @@ module Api
       def watch_targets
         chat_ids = Array(params.require(:chat_ids)).map(&:to_i).uniq
         profile = TelegramAccountProfile.find_or_initialize_by(telegram_account_id: @account.id)
-        profile.watched_chat_ids = chat_ids
-        profile.save!
+        profile.save! if profile.new_record?
+        profile.replace_watched_chat_ids!(chat_ids)
         full_sync = ActiveModel::Type::Boolean.new.cast(params[:full_sync])
-        sync = ensure_session!.sync_messages_for_chats(
+        session = ensure_session!
+        session.invalidate_watched_chat_ids_cache! if session.respond_to?(:invalidate_watched_chat_ids_cache!)
+        sync = session.sync_messages_for_chats(
           chat_ids:,
           limit_per_chat: full_sync ? nil : params[:message_limit],
           wait_seconds: params[:wait_seconds]

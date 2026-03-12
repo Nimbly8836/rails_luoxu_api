@@ -16,7 +16,8 @@ bin/rails db:migrate
 
 新增持久化表：
 - `telegram_accounts`: TD 会话状态
-- `telegram_account_profiles`: 登录账号资料与监听配置（`watched_chat_ids`）
+- `telegram_account_profiles`: 登录账号资料
+- `telegram_account_watch_targets`: 账号监听群组关系（`telegram_account_id` + `td_chat_id`）
 - `telegram_chats`: 每个登录账号同步到的聊天基础信息（id/名称/头像/来源账号）
 - `telegram_messages`: 监听到的消息内容（按账号+群+消息ID去重）
 - `system_users`: 你的系统用户（认证）
@@ -176,7 +177,7 @@ curl -X POST http://127.0.0.1:3000/api/auth/register \
 ```
 
 说明：
-- `chat_ids` 只能填写“已监听群组”，即所有 `telegram_account_profiles.watched_chat_ids` 的并集。
+- `chat_ids` 只能填写“已同步群组”，即存在于 `telegram_chats` 的群组。
 - 普通用户无法自行注册或修改自己的群组权限。
 
 ### 登录获取 token
@@ -187,10 +188,52 @@ curl -X POST http://127.0.0.1:3000/api/auth/login \
   -d '{"username":"u1","password":"pass123456"}'
 ```
 
+### 管理员查看系统用户及其监听群组列表
+
+```bash
+curl http://127.0.0.1:3000/api/auth/users \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+返回每个用户的：
+- `chat_ids`：可访问群组 ID 列表
+- `watched_chats`：群组对象列表（含 `td_chat_id/title/chat_type`）
+
+### 管理员为已有用户增删监听群组
+
+```bash
+curl -X PATCH http://127.0.0.1:3000/api/auth/users/<user_id>/chat_ids \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <admin_token>" \
+  -d '{"add_chat_ids":[-1001234567890],"remove_chat_ids":[-1009999999999]}'
+```
+
+说明：
+- 也可传 `chat_ids` 做全量覆盖。
+- 新增群组必须是已同步到 `telegram_chats` 的群组（建议先执行会话 `sync_chats`）。
+- 当用户权限新增群组时，会自动追加到 `telegram_account_watch_targets`。
+- 当用户权限新增群组时，会自动触发对应 Telegram 账号历史消息同步。
+- 从用户权限里删除群组不会回删监听关系；删除监听请走会话侧 `watch_targets` 管理。
+- 应用重启后会对已启用账号自动触发一次监听群组历史消息同步。
+
 ### 查看当前用户可见群组（需要 Bearer Token）
 
 ```bash
 curl http://127.0.0.1:3000/api/me/chats \
+  -H "Authorization: Bearer <token>"
+```
+
+### 查询群成员列表（需要 Bearer Token，默认每页 20）
+
+```bash
+curl "http://127.0.0.1:3000/api/me/chats/-1001234567890/members?page=1&per_page=20" \
+  -H "Authorization: Bearer <token>"
+```
+
+支持可选搜索参数 `q`（按 `name/username` 走 PGroonga 分词搜索；纯数字同时匹配 `uid`）：
+
+```bash
+curl "http://127.0.0.1:3000/api/me/chats/-1001234567890/members?q=alice&page=1&per_page=20" \
   -H "Authorization: Bearer <token>"
 ```
 
@@ -200,6 +243,17 @@ curl http://127.0.0.1:3000/api/me/chats \
 curl "http://127.0.0.1:3000/api/me/search/messages?q=hello&chat_id=-1001234567890&limit=50" \
   -H "Authorization: Bearer <token>"
 ```
+
+按多个用户 ID 过滤示例：
+
+```bash
+curl "http://127.0.0.1:3000/api/me/search/messages?q=hello&chat_id=-1001234567890&user_ids=12345,67890&limit=50" \
+  -H "Authorization: Bearer <token>"
+```
+
+说明：
+- 返回里的 `td_message_id` 是 TDLib 原始 ID。
+- 可用于 Telegram 深链的消息号在 `message_id`，并会附带 `tg_privatepost_channel_id` / `tg_privatepost_url`。
 
 ### 初始化首个管理员（一次性）
 

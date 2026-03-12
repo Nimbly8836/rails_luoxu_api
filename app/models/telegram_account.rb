@@ -4,6 +4,7 @@ class TelegramAccount < ApplicationRecord
   has_one :profile, class_name: "TelegramAccountProfile", dependent: :destroy
   has_many :telegram_chats, dependent: :destroy
   has_many :telegram_messages, dependent: :delete_all
+  has_many :watch_targets, class_name: "TelegramAccountWatchTarget", dependent: :delete_all
 
   STATES = %w[
     created

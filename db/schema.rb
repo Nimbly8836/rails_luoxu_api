@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_03_10_121000) do
+ActiveRecord::Schema[8.0].define(version: 2026_03_12_100000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pgroonga"
@@ -51,12 +51,21 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_10_121000) do
     t.boolean "is_support"
     t.boolean "is_scam"
     t.boolean "is_fake"
-    t.jsonb "watched_chat_ids", default: [], null: false
     t.jsonb "raw_payload", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.index ["td_user_id"], name: "index_telegram_account_profiles_on_td_user_id"
     t.index ["telegram_account_id"], name: "index_telegram_account_profiles_on_telegram_account_id", unique: true
+  end
+
+  create_table "telegram_account_watch_targets", force: :cascade do |t|
+    t.bigint "telegram_account_id", null: false
+    t.bigint "td_chat_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["td_chat_id"], name: "index_telegram_account_watch_targets_on_td_chat_id"
+    t.index ["telegram_account_id", "td_chat_id"], name: "index_telegram_account_watch_targets_on_account_and_chat", unique: true
+    t.index ["telegram_account_id"], name: "index_telegram_account_watch_targets_on_telegram_account_id"
   end
 
   create_table "telegram_accounts", force: :cascade do |t|
@@ -94,7 +103,10 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_10_121000) do
     t.binary "avatar_small_data"
     t.string "avatar_small_content_type"
     t.datetime "avatar_small_fetched_at"
+    t.index ["name", "username"], name: "usernames_idx", using: :pgroonga
+    t.index ["name"], name: "telegram_chat_usernames_name_idx", using: :pgroonga
     t.index ["uid", "group_id"], name: "index_telegram_chat_usernames_on_uid_and_group_id", unique: true
+    t.index ["username"], name: "telegram_chat_usernames_username_idx", using: :pgroonga
   end
 
   create_table "telegram_chats", force: :cascade do |t|
@@ -134,6 +146,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_10_121000) do
 
   add_foreign_key "system_user_chat_accesses", "system_users"
   add_foreign_key "telegram_account_profiles", "telegram_accounts"
+  add_foreign_key "telegram_account_watch_targets", "telegram_accounts"
   add_foreign_key "telegram_chats", "telegram_accounts"
   add_foreign_key "telegram_messages", "telegram_accounts"
 end
