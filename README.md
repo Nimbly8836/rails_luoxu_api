@@ -1,305 +1,125 @@
 # rails_luoxu_api
 
-基于 Rails + TDLib 的 Telegram 长连接后端（数据库持久化会话，重启自动恢复）。
+基于 Rails + TDLib 的 Telegram 长连接后端。
 
-## 1. 安装依赖
+## 1. 从零开始运行（Docker / Production）
+
+前提：
+- 已安装 Docker 和 Docker Compose
+- 项目根目录有 `Dockerfile`
+
+### Step 1) 准备 Rails credentials（只做一次）
+
+如果仓库里还没有 `config/credentials.yml.enc`，先创建。
+
+方式 A（本机已装 Ruby/Bundler）：
 
 ```bash
-bundle install
+EDITOR=vim bin/rails credentials:edit
 ```
 
-libtdjson 目前最高支持 1.8.35， https://github.com/tdlib/td.git 对应的版本是 9b6ff58
-lib下面放了我编译的两个，如果没有请自行编译并且命名成 libtdjson.* 中间不用版本号
-
-## 2. 初始化数据库
+方式 B（本机没有 Ruby，纯 Docker）：
 
 ```bash
-bin/rails db:migrate
+docker build -t rails_luoxu_api .
+
+docker run --rm -it \
+  -v "$PWD":/rails \
+  -w /rails \
+  rails_luoxu_api \
+  bash -lc 'EDITOR="ruby -e \"p=ARGV[0]; File.write(p, %q(telegram:\n  api_id: 123456\n  api_hash: your_api_hash\n  encryption_key: \\\"\\\"\n))\"" bin/rails credentials:edit'
 ```
 
-新增持久化表：
-- `telegram_accounts`: TD 会话状态
-- `telegram_account_profiles`: 登录账号资料
-- `telegram_account_watch_targets`: 账号监听群组关系（`telegram_account_id` + `td_chat_id`）
-- `telegram_chats`: 每个登录账号同步到的聊天基础信息（id/名称/头像/来源账号）
-- `telegram_messages`: 监听到的消息内容（按账号+群+消息ID去重）
-- `system_users`: 你的系统用户（认证）
-- `system_user_chat_accesses`: 系统用户可见群组授权
+会自动生成：
+- `config/credentials.yml.enc`
+- `config/master.key`
 
-## 3. 配置环境变量
+在 credentials 里至少写入 Telegram 参数（示例）：
 
-```bash
-export TELEGRAM_API_ID=123456
-export TELEGRAM_API_HASH=your_api_hash
-export TDLIB_LOG_LEVEL=1
-export TDLIB_DATABASE_ENCRYPTION_KEY=your_db_encryption_key
-```
-
-可选：
-
-```bash
-export TDLIB_LIB_PATH=/absolute/path/to/lib/dir
-export TDLIB_USE_TEST_DC=false
-export TDLIB_SYSTEM_LANGUAGE_CODE=en
-export TDLIB_DEVICE_MODEL="Rails Luoxu API"
-export TDLIB_SYSTEM_VERSION="macOS"
-export TDLIB_APP_VERSION="1.0"
+```yaml
+telegram:
+  api_id: 123456
+  api_hash: your_api_hash
+  encryption_key: ""
 ```
 
 说明：
-- `TDLIB_LIB_PATH` 是目录路径，不是文件路径；目录内应包含 `libtdjson.dylib/.so/.dll`。
-- 若不设置 `TDLIB_LIB_PATH`，项目会优先使用 `lib/libtdjson.*` 的目录。
+- 你如果没有启用 TDLib 加密，`encryption_key` 可以留空字符串。
+- 生产数据库连接请走 `DATABASE_URL`（见下一步），不要依赖 `credentials.db`。
 
-## 4. 启动服务
+### Step 2) 准备环境变量
 
-```bash
-bin/rails server
-```
-
-启动后会自动恢复数据库里 `enabled=true` 的 Telegram 账号连接。
-
-## 5. API 调用流程
-
-### 查询账号列表
+创建 `.env`（供 docker compose 使用）：
 
 ```bash
-curl http://127.0.0.1:3000/api/telegram/sessions
+cat > .env <<'ENV'
+RAILS_MASTER_KEY=replace_with_your_master_key
+DATABASE_URL=postgres://rails_luoxu_api:replace_with_db_password@postgres:5432/rails_luoxu_api_production
+POSTGRES_DB=rails_luoxu_api_production
+POSTGRES_USER=rails_luoxu_api
+POSTGRES_PASSWORD=replace_with_db_password
+# 可选：compose 默认使用 PGroonga 镜像；如需固定版本可覆盖
+# POSTGRES_IMAGE=pgroonga/pgroonga:your-tag
+# 可选：如果不放在 credentials，也可以直接用环境变量传 Telegram 参数
+# TELEGRAM_API_ID=123456
+# TELEGRAM_API_HASH=your_api_hash
+# 可选：未启用加密时可不填
+# TDLIB_DATABASE_ENCRYPTION_KEY=
+ENV
 ```
 
-### 查询聊天列表（按 chat 去重，多个来源默认返回第一个来源）
+如果你使用外部 PostgreSQL（不使用 compose 里的 `postgres` 服务）：
+- 在 `docker-compose.yml.example` 里注释掉 `postgres` 服务。
+- 同时删除 `app` 下的 `depends_on`。
+- `DATABASE_URL` 指向你已有的数据库。
+
+### Step 3) 启动
 
 ```bash
-curl http://127.0.0.1:3000/api/telegram/chats
+docker compose -f docker-compose.yml.example up -d
 ```
 
-### 创建会话
+容器启动时会自动执行 `bin/rails db:prepare`。
+
+### Step 4) 初始化首个管理员（一次性）
 
 ```bash
-curl -X POST http://127.0.0.1:3000/api/telegram/sessions
+docker compose -f docker-compose.yml.example exec app \
+  bin/rails runner "u = SystemUser.find_or_create_by!(username: 'admin') { |x| x.password = 'pass123456'; x.password_confirmation = 'pass123456' }; u.update!(admin: true, active: true); puts u.api_token"
 ```
 
-返回示例：
+执行后会输出 `api_token`。
 
-```json
-{
-  "session_id": "uuid",
-  "state": "wait_phone_number",
-  "me": null,
-  "error": null,
-  "enabled": true,
-  "use_test_dc": false
-}
-```
-
-如需测试环境 DC：
+### Step 5) 验证服务
 
 ```bash
-curl -X POST "http://127.0.0.1:3000/api/telegram/sessions?use_test_dc=true"
+curl http://127.0.0.1/up
 ```
 
-### 提交手机号
+## 2. 运行细节
+
+- `RAILS_MASTER_KEY`：用于解密 `config/credentials.yml.enc`。
+- `DATABASE_URL`：生产数据库连接（当前项目 production 配置优先使用它）。
+- `TDLIB_DATABASE_ENCRYPTION_KEY`：可选。只有你启用 TDLib 数据库加密时才需要。
+- 持久化：
+  - PostgreSQL 数据在 `postgres_data` volume
+  - Rails 存储目录在 `rails_storage` volume
+
+常用命令：
 
 ```bash
-curl -X POST http://127.0.0.1:3000/api/telegram/sessions/<session_id>/phone \
-  -H "Content-Type: application/json" \
-  -d '{"phone_number":"+8613800000000"}'
+# 查看日志
+docker compose -f docker-compose.yml.example logs -f app
+
+# 停止
+docker compose -f docker-compose.yml.example down
+
+# 停止并清理（含数据库卷）
+docker compose -f docker-compose.yml.example down -v
 ```
 
-### 提交短信验证码
+## 3. 文档
 
-```bash
-curl -X POST http://127.0.0.1:3000/api/telegram/sessions/<session_id>/code \
-  -H "Content-Type: application/json" \
-  -d '{"code":"12345"}'
-```
-
-### 提交 2FA 密码（如开启）
-
-```bash
-curl -X POST http://127.0.0.1:3000/api/telegram/sessions/<session_id>/password \
-  -H "Content-Type: application/json" \
-  -d '{"password":"your_2fa_password"}'
-```
-
-### 查询状态
-
-```bash
-curl http://127.0.0.1:3000/api/telegram/sessions/<session_id>
-```
-
-当 `state=ready` 时，`me` 会返回当前账号信息。
-
-### 配置该账号监听的群组列表
-
-```bash
-curl -X PATCH http://127.0.0.1:3000/api/telegram/sessions/<session_id>/watch_targets \
-  -H "Content-Type: application/json" \
-  -d '{"chat_ids":[-1001234567890,-1009999999999]}'
-```
-
-配置结果在返回字段 `profile.watched_chat_ids`。  
-配置后会立即回填最近消息到 `telegram_messages`，并持续监听新消息入库。
-
-### 手动同步该账号的聊天列表（登录成功后也会自动同步）
-
-```bash
-curl -X POST "http://127.0.0.1:3000/api/telegram/sessions/<session_id>/sync_chats?limit=500"
-```
-
-返回会包含 `sync` 字段，例如：
-- `total_chat_ids`: 本次拿到的 chat id 数量
-- `upserted`: 成功写入/更新数量
-- `failed`: 失败数量
-- `errors`: 失败明细（含 TD 返回信息）
-- `from_get_chats` / `from_search_chats` / `from_search_chats_on_server`: 各阶段命中数量
-- `from_updates_cache`: 如果 API 阶段全空，更新流已入库的聊天数量
-
-### 手动回填该账号监听群组的消息到 `telegram_messages`
-
-不传 `chat_ids` 时，默认使用该账号的 `profile.watched_chat_ids`。
-
-```bash
-curl -X POST http://127.0.0.1:3000/api/telegram/sessions/<session_id>/sync_messages \
-  -H "Content-Type: application/json" \
-  -d '{"wait_seconds":0.2}'
-```
-
-说明：
-- `chat_id` 是按群逐个拉取（每次请求一个群），接口会对每个群循环分页直到拉完。
-- `message_limit` 不传时表示尽量拉全量；传了就按每群上限截断。
-
-## 6. 系统用户认证与搜索
-
-### 管理员创建系统用户（仅管理员可调用）
-
-```bash
-curl -X POST http://127.0.0.1:3000/api/auth/register \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <admin_token>" \
-  -d '{"username":"u1","password":"pass123456","admin":false,"chat_ids":[-1001234567890]}'
-```
-
-说明：
-- `chat_ids` 只能填写“已同步群组”，即存在于 `telegram_chats` 的群组。
-- 普通用户无法自行注册或修改自己的群组权限。
-
-### 登录获取 token
-
-```bash
-curl -X POST http://127.0.0.1:3000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"u1","password":"pass123456"}'
-```
-
-### 管理员查看系统用户及其监听群组列表
-
-```bash
-curl http://127.0.0.1:3000/api/auth/users \
-  -H "Authorization: Bearer <admin_token>"
-```
-
-返回每个用户的：
-- `chat_ids`：可访问群组 ID 列表
-- `watched_chats`：群组对象列表（含 `td_chat_id/title/chat_type`）
-
-### 管理员为已有用户增删监听群组
-
-```bash
-curl -X PATCH http://127.0.0.1:3000/api/auth/users/<user_id>/chat_ids \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <admin_token>" \
-  -d '{"add_chat_ids":[-1001234567890],"remove_chat_ids":[-1009999999999]}'
-```
-
-说明：
-- 也可传 `chat_ids` 做全量覆盖。
-- 新增群组必须是已同步到 `telegram_chats` 的群组（建议先执行会话 `sync_chats`）。
-- 当用户权限新增群组时，会自动追加到 `telegram_account_watch_targets`。
-- 当用户权限新增群组时，会自动触发对应 Telegram 账号历史消息同步。
-- 从用户权限里删除群组不会回删监听关系；删除监听请走会话侧 `watch_targets` 管理。
-- 应用重启后会对已启用账号自动触发一次监听群组历史消息同步。
-
-### 查看当前用户可见群组（需要 Bearer Token）
-
-```bash
-curl http://127.0.0.1:3000/api/me/chats \
-  -H "Authorization: Bearer <token>"
-```
-
-### 查询群成员列表（需要 Bearer Token，默认每页 20）
-
-```bash
-curl "http://127.0.0.1:3000/api/me/chats/-1001234567890/members?page=1&per_page=20" \
-  -H "Authorization: Bearer <token>"
-```
-
-支持可选搜索参数 `q`（按 `name/username` 走 PGroonga 分词搜索；纯数字同时匹配 `uid`）：
-
-```bash
-curl "http://127.0.0.1:3000/api/me/chats/-1001234567890/members?q=alice&page=1&per_page=20" \
-  -H "Authorization: Bearer <token>"
-```
-
-### 搜索消息（需要 Bearer Token）
-
-```bash
-curl "http://127.0.0.1:3000/api/me/search/messages?q=hello&chat_id=-1001234567890&limit=50" \
-  -H "Authorization: Bearer <token>"
-```
-
-按多个用户 ID 过滤示例：
-
-```bash
-curl "http://127.0.0.1:3000/api/me/search/messages?q=hello&chat_id=-1001234567890&user_ids=12345,67890&limit=50" \
-  -H "Authorization: Bearer <token>"
-```
-
-说明：
-- 返回里的 `td_message_id` 是 TDLib 原始 ID。
-- 可用于 Telegram 深链的消息号在 `message_id`，并会附带 `tg_privatepost_channel_id` / `tg_privatepost_url`。
-
-### 初始化首个管理员（一次性）
-
-```bash
-bin/rails runner "u = SystemUser.find_or_create_by!(username: 'admin') { |x| x.password = 'pass123456'; x.password_confirmation = 'pass123456' }; u.update!(admin: true); puts u.api_token"
-```
-
-### 销毁会话
-
-```bash
-curl -X DELETE http://127.0.0.1:3000/api/telegram/sessions/<session_id>
-```
-
-销毁后会把账号置为 `enabled=false`，并断开 TD 客户端。
-
-## 当前版本推荐 TD.configure
-
-`tdlib-ruby 3.1.0` 推荐配置（已在 `config/initializers/td.rb` 实现）：
-
-```ruby
-TD.configure do |config|
-  config.lib_path = ENV.fetch("TDLIB_LIB_PATH", Rails.root.join("lib").to_s)
-  config.encryption_key = ENV["TDLIB_ENCRYPTION_KEY"] # gem 当前版本不会自动注入 setTdlibParameters
-
-  config.client.api_id = ENV.fetch("TELEGRAM_API_ID").to_i
-  config.client.api_hash = ENV.fetch("TELEGRAM_API_HASH")
-  config.client.use_test_dc = ActiveModel::Type::Boolean.new.cast(ENV.fetch("TDLIB_USE_TEST_DC", "false"))
-
-  # 全局默认目录；多账号会在运行时覆写为 storage/tdlib/<uuid>/db 和 files
-  config.client.database_directory = Rails.root.join("storage", "tdlib", "default", "db").to_s
-  config.client.files_directory = Rails.root.join("storage", "tdlib", "default", "files").to_s
-
-  config.client.use_file_database = true
-  config.client.use_chat_info_database = true
-  config.client.use_secret_chats = true
-  config.client.use_message_database = true
-  config.client.system_language_code = ENV.fetch("TDLIB_SYSTEM_LANGUAGE_CODE", "en")
-  config.client.device_model = ENV.fetch("TDLIB_DEVICE_MODEL", "Rails Luoxu API")
-  config.client.system_version = ENV.fetch("TDLIB_SYSTEM_VERSION", RUBY_PLATFORM)
-  config.client.application_version = ENV.fetch("TDLIB_APP_VERSION", "1.0")
-end
-```
-
-注意：
-- `database_encryption_key` 需要通过 `TD::Client.new(database_encryption_key: ...)` 传入，本项目通过 `TDLIB_DATABASE_ENCRYPTION_KEY` 在运行时注入。
-- 你给出的 `enable_storage_optimizer` / `ignore_file_names` 在 `tdlib-ruby 3.1.0` 的 `TD.configure` 客户端设置里不可用。
+- API 文档：`docs/api.md`
+- 路由文档：`docs/api_routes.md`
+- 开发文档：`docs/development.md`

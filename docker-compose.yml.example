@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  # Optional local PostgreSQL.
+  # If you already have an external PostgreSQL, comment out this service,
+  # remove `depends_on` in `app`, and point DATABASE_URL to your existing DB.
+  postgres:
+    # Use PGroonga image by default (non-official postgres image).
+    # You can pin/override by setting POSTGRES_IMAGE in .env.
+    image: ${POSTGRES_IMAGE:-pgroonga/pgroonga:latest}
+    container_name: rails_luoxu_api_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rails_luoxu_api_production}
+      POSTGRES_USER: ${POSTGRES_USER:-rails_luoxu_api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    # Pull image from GitHub Container Registry.
+    image: ghcr.io/leat/rails_luoxu_api:latest
+    # If you prefer local build, use the block below and comment out `image`.
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+
+    container_name: rails_luoxu_api_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      RAILS_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgres://rails_luoxu_api:change_me@postgres:5432/rails_luoxu_api_production}
+      RAILS_MASTER_KEY: ${RAILS_MASTER_KEY}
+
+      # Telegram config: choose one
+      # 1) Put telegram.api_id/api_hash in credentials -> no need env vars below
+      # 2) Or pass env vars below
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+
+      # Optional: only needed when TDLib database encryption is enabled
+      TDLIB_DATABASE_ENCRYPTION_KEY: ${TDLIB_DATABASE_ENCRYPTION_KEY:-}
+    ports:
+      - "80:80"
+    volumes:
+      - rails_storage:/rails/storage
+
+volumes:
+  postgres_data:
+  rails_storage:
