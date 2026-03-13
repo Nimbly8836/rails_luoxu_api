@@ -81,18 +81,21 @@ test:
 production:
   primary: &primary_production
     <<: *default
-    database: rails_luoxu_api_production
-    username: rails_luoxu_api
+    url: <%= ENV["DATABASE_URL"] %>
+    host: <%= ENV["RAILS_LUOXU_API_DATABASE_HOST"] %>
+    port: <%= ENV["RAILS_LUOXU_API_DATABASE_PORT"] %>
+    database: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_NAME", "rails_luoxu_api_production") %>
+    username: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_USERNAME", "rails_luoxu_api") %>
     password: <%= ENV["RAILS_LUOXU_API_DATABASE_PASSWORD"] %>
   cache:
     <<: *primary_production
-    database: rails_luoxu_api_production_cache
+    database: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_CACHE_NAME", "rails_luoxu_api_production_cache") %>
     migrations_paths: db/cache_migrate
   queue:
     <<: *primary_production
-    database: rails_luoxu_api_production_queue
+    database: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_QUEUE_NAME", "rails_luoxu_api_production_queue") %>
     migrations_paths: db/queue_migrate
   cable:
     <<: *primary_production
-    database: rails_luoxu_api_production_cable
+    database: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_CABLE_NAME", "rails_luoxu_api_production_cable") %>
     migrations_paths: db/cable_migrate
