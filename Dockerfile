@@ -9,6 +9,7 @@
 
 # Make sure RUBY_VERSION matches the Ruby version in .ruby-version
 ARG RUBY_VERSION=3.4.5
+ARG TDLIB_COMMIT=9b6ff5863
 FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
 
 # Rails app lives here
@@ -24,6 +25,60 @@ ENV RAILS_ENV="production" \
     BUNDLE_DEPLOYMENT="1" \
     BUNDLE_PATH="/usr/local/bundle" \
     BUNDLE_WITHOUT="development"
+
+# Build TDLib from source and export libtdjson.so
+FROM base AS tdlib-build
+ARG TDLIB_COMMIT
+
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y \
+      ca-certificates \
+      clang \
+      cmake \
+      git \
+      gperf \
+      libssl-dev \
+      llvm \
+      make \
+      zlib1g-dev && \
+    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+
+RUN set -eux; \
+    git clone https://github.com/tdlib/td.git /tmp/td; \
+    cd /tmp/td; \
+    git checkout "${TDLIB_COMMIT}"; \
+    rm -rf build; \
+    mkdir build; \
+    cd build; \
+    if ! ( \
+      CXXFLAGS="-stdlib=libc++" \
+      CC=/usr/bin/clang \
+      CXX=/usr/bin/clang++ \
+      cmake -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib \
+            -DTD_ENABLE_LTO=ON \
+            -DCMAKE_AR=/usr/bin/llvm-ar \
+            -DCMAKE_NM=/usr/bin/llvm-nm \
+            -DCMAKE_OBJDUMP=/usr/bin/llvm-objdump \
+            -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
+            .. \
+    ); then \
+      echo "TDLib configure with libc++ failed, fallback to clang default stdlib."; \
+      rm -f CMakeCache.txt; \
+      rm -rf CMakeFiles; \
+      CC=/usr/bin/clang \
+      CXX=/usr/bin/clang++ \
+      cmake -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib \
+            -DTD_ENABLE_LTO=ON \
+            -DCMAKE_AR=/usr/bin/llvm-ar \
+            -DCMAKE_NM=/usr/bin/llvm-nm \
+            -DCMAKE_OBJDUMP=/usr/bin/llvm-objdump \
+            -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
+            ..; \
+    fi; \
+    cmake --build . --target install -j"$(nproc)"; \
+    ls -l ../tdlib/lib
 
 # Throw-away build stage to reduce size of final image
 FROM base AS build
@@ -41,6 +96,8 @@ RUN bundle install && \
 
 # Copy application code
 COPY . .
+# Use the tdlib binary compiled in tdlib-build stage.
+COPY --from=tdlib-build /tmp/td/tdlib/lib/libtdjson.so /rails/lib/libtdjson.so
 
 # Precompile bootsnap code for faster boot times
 RUN bundle exec bootsnap precompile app/ lib/

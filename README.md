@@ -110,6 +110,9 @@ curl http://127.0.0.1/up
 - `RAILS_MASTER_KEY`：用于解密 `config/credentials.yml.enc`。
 - `DATABASE_URL`：生产数据库连接（当前项目 production 配置优先使用它）。
 - `TDLIB_DATABASE_ENCRYPTION_KEY`：可选。只有你启用 TDLib 数据库加密时才需要。
+- TDLib 动态库（Docker/Linux）：
+  - Docker 构建阶段会从 TDLib 源码自动编译 `libtdjson.so` 并打包进镜像。
+  - 默认使用 TD commit `9b6ff5863`，可用 `--build-arg TDLIB_COMMIT=<commit>` 覆盖。
 - 本地目录挂载（默认）：
   - `POSTGRES_DATA_DIR` -> `/var/lib/postgresql/data`
   - `RAILS_STORAGE_DIR` -> `/rails/storage`
