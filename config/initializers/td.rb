@@ -7,8 +7,17 @@ rescue LoadError
 end
 
 if defined?(TD)
-  api_id = Rails.application.credentials.telegram.api_id || ENV["TELEGRAM_API_ID"]
-  api_hash = Rails.application.credentials.telegram.api_hash || ENV["TELEGRAM_API_HASH"]
+  safe_credential = lambda do |*path|
+    Rails.application.credentials.dig(*path)
+  rescue ActiveSupport::EncryptedFile::MissingKeyError,
+         ActiveSupport::MessageEncryptor::InvalidMessage,
+         KeyError,
+         NoMethodError
+    nil
+  end
+
+  api_id = ENV["TELEGRAM_API_ID"].presence || safe_credential.call(:telegram, :api_id)
+  api_hash = ENV["TELEGRAM_API_HASH"].presence || safe_credential.call(:telegram, :api_hash)
   log_level = Integer(ENV.fetch("TDLIB_LOG_LEVEL", "1"))
   lib_dir = ENV["TDLIB_LIB_PATH"].presence
   lib_dir ||= begin
@@ -19,8 +28,8 @@ if defined?(TD)
   TD.configure do |config|
     # lib_path must always be set so TD::Api can load libtdjson even in diagnostics.
     config.lib_path = lib_dir
-    config.encryption_key = Rails.application.credentials.telegram.encryption_key.presence ||
-                            ENV["TDLIB_ENCRYPTION_KEY"].presence
+    config.encryption_key = ENV["TDLIB_ENCRYPTION_KEY"].presence ||
+                            safe_credential.call(:telegram, :encryption_key).presence
     config.client.use_test_dc = ActiveModel::Type::Boolean.new.cast(ENV.fetch("TDLIB_USE_TEST_DC", "false"))
     config.client.database_directory = Rails.root.join("storage", "tdlib", "default", "db").to_s
     config.client.files_directory = Rails.root.join("storage", "tdlib", "default", "files").to_s
