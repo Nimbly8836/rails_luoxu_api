@@ -60,12 +60,21 @@ POSTGRES_USER=rails_luoxu_api
 POSTGRES_PASSWORD=replace_with_db_password
 # 可选：compose 默认使用 PGroonga 镜像；如需固定版本可覆盖
 # POSTGRES_IMAGE=pgroonga/pgroonga:your-tag
+# 本地目录挂载（bind mount）
+POSTGRES_DATA_DIR=./.docker/postgres
+RAILS_STORAGE_DIR=./.docker/storage
 # 可选：如果不放在 credentials，也可以直接用环境变量传 Telegram 参数
 # TELEGRAM_API_ID=123456
 # TELEGRAM_API_HASH=your_api_hash
 # 可选：未启用加密时可不填
 # TDLIB_DATABASE_ENCRYPTION_KEY=
 ENV
+```
+
+创建本地挂载目录：
+
+```bash
+mkdir -p ./.docker/postgres ./.docker/storage
 ```
 
 如果你使用外部 PostgreSQL（不使用 compose 里的 `postgres` 服务）：
@@ -101,9 +110,9 @@ curl http://127.0.0.1/up
 - `RAILS_MASTER_KEY`：用于解密 `config/credentials.yml.enc`。
 - `DATABASE_URL`：生产数据库连接（当前项目 production 配置优先使用它）。
 - `TDLIB_DATABASE_ENCRYPTION_KEY`：可选。只有你启用 TDLib 数据库加密时才需要。
-- 持久化：
-  - PostgreSQL 数据在 `postgres_data` volume
-  - Rails 存储目录在 `rails_storage` volume
+- 本地目录挂载（默认）：
+  - `POSTGRES_DATA_DIR` -> `/var/lib/postgresql/data`
+  - `RAILS_STORAGE_DIR` -> `/rails/storage`
 
 常用命令：
 

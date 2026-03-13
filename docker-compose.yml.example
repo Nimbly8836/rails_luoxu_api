@@ -15,7 +15,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-rails_luoxu_api}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # Local bind mount for PostgreSQL data
+      - ${POSTGRES_DATA_DIR:-./.docker/postgres}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -53,8 +54,5 @@ services:
     ports:
       - "80:80"
     volumes:
-      - rails_storage:/rails/storage
-
-volumes:
-  postgres_data:
-  rails_storage:
+      # Local bind mount for Rails storage (ActiveStorage + tdlib files)
+      - ${RAILS_STORAGE_DIR:-./.docker/storage}:/rails/storage
