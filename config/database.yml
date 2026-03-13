@@ -22,25 +22,25 @@ default: &default
 
 development:
   <<: *default
-  database: rails_luoxu_api_development
+  database: <%= ENV.fetch("RAILS_LUOXU_API_DEVELOPMENT_DATABASE_NAME", "rails_luoxu_api_development") %>
 
   # The specified database role being used to connect to PostgreSQL.
   # To create additional roles in PostgreSQL see `$ createuser --help`.
   # When left blank, PostgreSQL will use the default role. This is
   # the same name as the operating system user running Rails.
-  username: <%= Rails.application.credentials.db.username %>
+  username: <%= Rails.application.credentials.dig(:db, :username) || ENV["RAILS_LUOXU_API_DEVELOPMENT_DATABASE_USERNAME"] %>
 
   # The password associated with the PostgreSQL role (username).
-  password: <%= Rails.application.credentials.db.password %>
+  password: <%= Rails.application.credentials.dig(:db, :password) || ENV["RAILS_LUOXU_API_DEVELOPMENT_DATABASE_PASSWORD"] %>
 
   # Connect on a TCP socket. Omitted by default since the client uses a
   # domain socket that doesn't need configuration. Windows does not have
   # domain sockets, so uncomment these lines.
-  host: <%= Rails.application.credentials.db.host %>
+  host: <%= Rails.application.credentials.dig(:db, :host) || ENV["RAILS_LUOXU_API_DEVELOPMENT_DATABASE_HOST"] %>
 
   # The TCP port the server listens on. Defaults to 5432.
   # If your server runs on a different port number, change accordingly.
-  port: <%= Rails.application.credentials.db.port %>
+  port: <%= Rails.application.credentials.dig(:db, :port) || ENV["RAILS_LUOXU_API_DEVELOPMENT_DATABASE_PORT"] %>
 
   # Schema search path. The server defaults to $user,public
   #schema_search_path: myapp,sharedapp,public
