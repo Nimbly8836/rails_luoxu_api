@@ -8,6 +8,9 @@
 bundle install
 ```
 
+libtdjson 目前最高支持 1.8.35， https://github.com/tdlib/td.git 对应的版本是 9b6ff58
+lib下面放了我编译的两个，如果没有请自行编译并且命名成 libtdjson.* 中间不用版本号
+
 ## 2. 初始化数据库
 
 ```bash
