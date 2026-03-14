@@ -9,6 +9,7 @@
 
 # Make sure RUBY_VERSION matches the Ruby version in .ruby-version
 ARG RUBY_VERSION=3.4.5
+ARG TDLIB_COMMIT=9b6ff5863
 FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
 
 # Rails app lives here
@@ -25,9 +26,50 @@ ENV RAILS_ENV="production" \
     BUNDLE_PATH="/usr/local/bundle" \
     BUNDLE_WITHOUT="development"
 
+# Build TDLib from source and export libtdjson.so (cache-friendly stage).
+FROM base AS tdlib-build
+ARG TDLIB_COMMIT
+
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y \
+      ca-certificates \
+      cmake \
+      git \
+      gperf \
+      libssl-dev \
+      make \
+      php-cli \
+      zlib1g-dev && \
+    (apt-get install --no-install-recommends -y clang-18 libc++-18-dev libc++abi-18-dev || \
+     apt-get install --no-install-recommends -y clang libc++-dev libc++abi-dev) && \
+    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+
+RUN set -eux; \
+    git clone https://github.com/tdlib/td.git /tmp/td; \
+    cd /tmp/td; \
+    git checkout "${TDLIB_COMMIT}"; \
+    rm -rf build; \
+    mkdir build; \
+    cd build; \
+    cc_bin="$(command -v clang-18 || command -v clang)"; \
+    cxx_bin="$(command -v clang++-18 || command -v clang++)"; \
+    CXXFLAGS="-stdlib=libc++" \
+    CC="${cc_bin}" \
+    CXX="${cxx_bin}" \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX:PATH=../tdlib \
+          ..; \
+    cmake --build . --target tdjson -j"$(nproc)"; \
+    lib_file="$(find . -type f -name 'libtdjson.so' | head -n1)"; \
+    if [ -z "${lib_file}" ]; then \
+      lib_file="$(find . -type f -name 'libtdjson.so.*' | sort -V | tail -n1)"; \
+    fi; \
+    test -n "${lib_file}"; \
+    install -Dm755 "${lib_file}" /out/libtdjson.so; \
+    ls -l /out/libtdjson.so
+
 # Throw-away build stage to reduce size of final image
 FROM base AS build
-ARG TARGETARCH
 
 # Install packages needed to build gems
 RUN apt-get update -qq && \
@@ -42,34 +84,8 @@ RUN bundle install && \
 
 # Copy application code
 COPY . .
-
-# Select local TDLib binary and normalize to lib/libtdjson.so.
-# Supported source files:
-# - lib/libtdjson-amd64_linux.so
-# - lib/libtdjson-amd64_linux.so.1.8.35
-# - lib/libtdjson-aarch64_linux.so
-# - lib/libtdjson-aarch64_linux.so.1.8.35
-# - lib/libtdjson.so
-# - lib/libtdjson.so.1.8.35
-RUN set -eux; \
-    pick_latest() { \
-      pattern="$1"; \
-      find lib -maxdepth 1 -type f -name "${pattern}" | sort -V | tail -n 1; \
-    }; \
-    selected=""; \
-    case "${TARGETARCH:-}" in \
-      amd64) selected="$(pick_latest 'libtdjson-amd64_linux.so*')" ;; \
-      arm64) selected="$(pick_latest 'libtdjson-aarch64_linux.so*')" ;; \
-    esac; \
-    if [ -z "${selected}" ]; then \
-      selected="$(pick_latest 'libtdjson.so*')"; \
-    fi; \
-    if [ -z "${selected}" ]; then \
-      echo "ERROR: No TDLib binary found in ./lib (expected libtdjson*.so)"; \
-      exit 1; \
-    fi; \
-    cp "${selected}" lib/libtdjson.so; \
-    ls -l lib/libtdjson.so
+# Use tdlib binary compiled in tdlib-build stage.
+COPY --from=tdlib-build /out/libtdjson.so /rails/lib/libtdjson.so
 
 # Precompile bootsnap code for faster boot times
 RUN bundle exec bootsnap precompile app/ lib/

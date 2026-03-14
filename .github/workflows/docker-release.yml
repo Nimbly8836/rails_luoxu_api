@@ -41,7 +41,7 @@ jobs:
             type=ref,event=tag
             type=sha,prefix=sha-
 
-      - name: Build and push multi-arch image
+      - name: Build and push amd64 image
         uses: docker/build-push-action@v6
         with:
           context: .

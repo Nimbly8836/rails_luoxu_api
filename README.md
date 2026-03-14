@@ -111,12 +111,8 @@ curl http://127.0.0.1/up
 - `DATABASE_URL`：生产数据库连接（当前项目 production 配置优先使用它）。
 - `TDLIB_DATABASE_ENCRYPTION_KEY`：可选。只有你启用 TDLib 数据库加密时才需要。
 - TDLib 动态库（Docker/Linux）：
-  - 需要在项目 `lib/` 目录提供 Linux 的 `libtdjson` 文件。
-  - 优先按架构读取：
-    - `lib/libtdjson-amd64_linux.so*`（x86_64）
-    - `lib/libtdjson-aarch64_linux.so*`（arm64）
-  - 若找不到架构文件，则回退 `lib/libtdjson.so*`。
-  - 构建时会复制为标准文件名 `lib/libtdjson.so`（`tdlib-ruby` 固定加载这个名字）。
+  - Docker 构建阶段会从 TDLib 源码自动编译 `libtdjson.so` 并打包进镜像。
+  - 默认使用 TD commit `9b6ff5863`，可用 `--build-arg TDLIB_COMMIT=<commit>` 覆盖。
 - 本地目录挂载（默认）：
   - `POSTGRES_DATA_DIR` -> `/var/lib/postgresql/data`
   - `RAILS_STORAGE_DIR` -> `/rails/storage`
