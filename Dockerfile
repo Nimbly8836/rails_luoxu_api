@@ -66,6 +66,12 @@ RUN set -eux; \
     fi; \
     test -n "${lib_file}"; \
     install -Dm755 "${lib_file}" /out/libtdjson.so; \
+    mkdir -p /out/deps; \
+    ldd /out/libtdjson.so | awk '/=>/ { print $3 }' | grep -E 'libc\\+\\+|libc\\+\\+abi|libunwind' | while read -r dep; do \
+      test -n "${dep}"; \
+      cp -v "${dep}" /out/deps/; \
+    done; \
+    ls -l /out/deps || true; \
     ls -l /out/libtdjson.so
 
 # Throw-away build stage to reduce size of final image
@@ -99,6 +105,8 @@ FROM base
 # Copy built artifacts: gems, application
 COPY --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
 COPY --from=build /rails /rails
+COPY --from=tdlib-build /out/deps/ /usr/local/lib/tdlib-deps/
+ENV LD_LIBRARY_PATH="/usr/local/lib/tdlib-deps:${LD_LIBRARY_PATH}"
 
 # Run and own only the runtime files as a non-root user for security
 RUN groupadd --system --gid 1000 rails && \
