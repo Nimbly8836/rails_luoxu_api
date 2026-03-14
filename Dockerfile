@@ -33,14 +33,15 @@ ARG TDLIB_COMMIT
 RUN apt-get update -qq && \
     apt-get install --no-install-recommends -y \
       ca-certificates \
-      clang \
       cmake \
       git \
       gperf \
       libssl-dev \
-      llvm \
       make \
+      php-cli \
       zlib1g-dev && \
+    (apt-get install --no-install-recommends -y clang-18 libc++-18-dev libc++abi-18-dev || \
+     apt-get install --no-install-recommends -y clang libc++-dev libc++abi-dev) && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 RUN set -eux; \
@@ -50,34 +51,21 @@ RUN set -eux; \
     rm -rf build; \
     mkdir build; \
     cd build; \
-    if ! ( \
-      CXXFLAGS="-stdlib=libc++" \
-      CC=/usr/bin/clang \
-      CXX=/usr/bin/clang++ \
-      cmake -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib \
-            -DTD_ENABLE_LTO=ON \
-            -DCMAKE_AR=/usr/bin/llvm-ar \
-            -DCMAKE_NM=/usr/bin/llvm-nm \
-            -DCMAKE_OBJDUMP=/usr/bin/llvm-objdump \
-            -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
-            .. \
-    ); then \
-      echo "TDLib configure with libc++ failed, fallback to clang default stdlib."; \
-      rm -f CMakeCache.txt; \
-      rm -rf CMakeFiles; \
-      CC=/usr/bin/clang \
-      CXX=/usr/bin/clang++ \
-      cmake -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib \
-            -DTD_ENABLE_LTO=ON \
-            -DCMAKE_AR=/usr/bin/llvm-ar \
-            -DCMAKE_NM=/usr/bin/llvm-nm \
-            -DCMAKE_OBJDUMP=/usr/bin/llvm-objdump \
-            -DCMAKE_RANLIB=/usr/bin/llvm-ranlib \
-            ..; \
+    cc_bin="$(command -v clang-18 || command -v clang)"; \
+    cxx_bin="$(command -v clang++-18 || command -v clang++)"; \
+    CXXFLAGS="-stdlib=libc++" \
+    CC="${cc_bin}" \
+    CXX="${cxx_bin}" \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX:PATH=../tdlib \
+          ..; \
+    cmake --build . --target tdjson -j"$(nproc)"; \
+    lib_file="$(find . -type f -name 'libtdjson.so' | head -n1)"; \
+    if [ -z "${lib_file}" ]; then \
+      lib_file="$(find . -type f -name 'libtdjson.so.*' | sort -V | tail -n1)"; \
     fi; \
-    cmake --build . --target install -j"$(nproc)"; \
+    test -n "${lib_file}"; \
+    install -Dm755 "${lib_file}" ../tdlib/lib/libtdjson.so; \
     ls -l ../tdlib/lib
 
 # Throw-away build stage to reduce size of final image

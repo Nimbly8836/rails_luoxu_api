@@ -10,9 +10,14 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: docker-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +42,24 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=ref,event=tag
+            type=sha,prefix=sha-
+
+      # Warm cache for the expensive TDLib build stage first.
+      - name: Warm tdlib-build cache (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: tdlib-build
+          platforms: linux/amd64
+          pull: true
+          push: false
+          provenance: false
+          sbom: false
+          build-args: |
+            TDLIB_COMMIT=9b6ff5863
+          cache-from: type=gha,scope=tdlib-build
+          cache-to: type=gha,mode=max,scope=tdlib-build
 
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v6
@@ -44,6 +67,15 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
+          pull: true
           push: true
+          provenance: false
+          sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            TDLIB_COMMIT=9b6ff5863
+          cache-from: |
+            type=gha,scope=tdlib-build
+            type=gha,scope=docker-release
+          cache-to: type=gha,mode=max,scope=docker-release
