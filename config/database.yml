@@ -1,3 +1,28 @@
+<%
+require "uri"
+
+database_name_for = lambda do |env_name, default_name|
+  value = ENV[env_name]
+  value.nil? || value.empty? ? default_name : value
+end
+
+database_url_for = lambda do |database_name, *url_env_names|
+  source_url = url_env_names.lazy.map { |env_name| ENV[env_name] }.find { |value| !value.nil? && !value.empty? }
+  next if source_url.nil?
+
+  uri = URI.parse(source_url)
+  uri.path = "/#{database_name}"
+  uri.to_s
+rescue URI::InvalidURIError
+  source_url
+end
+
+production_primary_database = database_name_for.call("RAILS_LUOXU_API_DATABASE_NAME", "rails_luoxu_api_production")
+production_cache_database = database_name_for.call("RAILS_LUOXU_API_DATABASE_CACHE_NAME", "rails_luoxu_api_production_cache")
+production_queue_database = database_name_for.call("RAILS_LUOXU_API_DATABASE_QUEUE_NAME", "rails_luoxu_api_production_queue")
+production_cable_database = database_name_for.call("RAILS_LUOXU_API_DATABASE_CABLE_NAME", "rails_luoxu_api_production_cable")
+%>
+
 # PostgreSQL. Versions 9.3 and up are supported.
 #
 # Install the pg driver:
@@ -81,21 +106,24 @@ test:
 production:
   primary: &primary_production
     <<: *default
-    url: <%= ENV["DATABASE_URL"] %>
+    url: <%= database_url_for.call(production_primary_database, "RAILS_LUOXU_API_DATABASE_URL", "DATABASE_URL") %>
     host: <%= ENV["RAILS_LUOXU_API_DATABASE_HOST"] %>
     port: <%= ENV["RAILS_LUOXU_API_DATABASE_PORT"] %>
-    database: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_NAME", "rails_luoxu_api_production") %>
+    database: <%= production_primary_database %>
     username: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_USERNAME", "rails_luoxu_api") %>
     password: <%= ENV["RAILS_LUOXU_API_DATABASE_PASSWORD"] %>
   cache:
     <<: *primary_production
-    database: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_CACHE_NAME", "rails_luoxu_api_production_cache") %>
+    url: <%= database_url_for.call(production_cache_database, "RAILS_LUOXU_API_DATABASE_CACHE_URL", "RAILS_LUOXU_API_DATABASE_URL", "DATABASE_URL") %>
+    database: <%= production_cache_database %>
     migrations_paths: db/cache_migrate
   queue:
     <<: *primary_production
-    database: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_QUEUE_NAME", "rails_luoxu_api_production_queue") %>
+    url: <%= database_url_for.call(production_queue_database, "RAILS_LUOXU_API_DATABASE_QUEUE_URL", "RAILS_LUOXU_API_DATABASE_URL", "DATABASE_URL") %>
+    database: <%= production_queue_database %>
     migrations_paths: db/queue_migrate
   cable:
     <<: *primary_production
-    database: <%= ENV.fetch("RAILS_LUOXU_API_DATABASE_CABLE_NAME", "rails_luoxu_api_production_cable") %>
+    url: <%= database_url_for.call(production_cable_database, "RAILS_LUOXU_API_DATABASE_CABLE_URL", "RAILS_LUOXU_API_DATABASE_URL", "DATABASE_URL") %>
+    database: <%= production_cable_database %>
     migrations_paths: db/cable_migrate
