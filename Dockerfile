@@ -18,6 +18,8 @@ WORKDIR /rails
 # Install base packages
 RUN apt-get update -qq && \
     apt-get install --no-install-recommends -y curl libjemalloc2 libvips postgresql-client && \
+    (apt-get install --no-install-recommends -y libc++1-18 libc++abi1-18 || \
+     apt-get install --no-install-recommends -y libc++1 libc++abi1) && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 # Set production environment
@@ -40,8 +42,8 @@ RUN apt-get update -qq && \
       make \
       php-cli \
       zlib1g-dev && \
-    (apt-get install --no-install-recommends -y clang-18 libc++-18-dev libc++abi-18-dev libc++1-18 libc++abi1-18 || \
-     apt-get install --no-install-recommends -y clang libc++-dev libc++abi-dev libc++1 libc++abi1) && \
+    (apt-get install --no-install-recommends -y clang-18 libc++-18-dev libc++abi-18-dev || \
+     apt-get install --no-install-recommends -y clang libc++-dev libc++abi-dev) && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 RUN set -eux; \
@@ -66,14 +68,6 @@ RUN set -eux; \
     fi; \
     test -n "${lib_file}"; \
     install -Dm755 "${lib_file}" /out/libtdjson.so; \
-    mkdir -p /out/deps; \
-    for name in libc++.so.1 libc++abi.so.1 libunwind.so.1; do \
-      dep="$(find /usr/lib /usr/lib64 /lib /lib64 -type f -name "${name}" | head -n1 || true)"; \
-      if [ -n "${dep}" ]; then cp -v "${dep}" /out/deps/; fi; \
-    done; \
-    test -f /out/deps/libc++.so.1; \
-    test -f /out/deps/libc++abi.so.1; \
-    ls -l /out/deps || true; \
     ls -l /out/libtdjson.so
 
 # Throw-away build stage to reduce size of final image
@@ -107,14 +101,6 @@ FROM base
 # Copy built artifacts: gems, application
 COPY --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
 COPY --from=build /rails /rails
-COPY --from=tdlib-build /out/deps/ /usr/local/lib/tdlib-deps/
-
-# Make tdlib runtime deps globally discoverable by dynamic linker.
-RUN set -eux; \
-    if [ -d /usr/local/lib/tdlib-deps ]; then \
-      cp -av /usr/local/lib/tdlib-deps/. /usr/local/lib/; \
-    fi; \
-    ldconfig || true
 
 # Run and own only the runtime files as a non-root user for security
 RUN groupadd --system --gid 1000 rails && \
