@@ -7,7 +7,7 @@ services:
   postgres:
     # Use PGroonga image by default (non-official postgres image).
     # You can pin/override by setting POSTGRES_IMAGE in .env.
-    image: ${POSTGRES_IMAGE:-pgroonga/pgroonga:latest}
+    image: ${POSTGRES_IMAGE:-groonga/pgroonga:latest}
     container_name: rails_luoxu_api_postgres
     restart: unless-stopped
     environment:
@@ -40,8 +40,10 @@ services:
       - .env
     environment:
       RAILS_ENV: production
-      DATABASE_URL: ${DATABASE_URL:-postgres://rails_luoxu_api:change_me@postgres:5432/rails_luoxu_api_production}
+      PORT: ${PORT:-80}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://rails_luoxu_api:change_me@postgres:5432/rails_luoxu_api_production}
       RAILS_MASTER_KEY: ${RAILS_MASTER_KEY}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
 
       # Telegram config: choose one
       # 1) Put telegram.api_id/api_hash in credentials -> no need env vars below

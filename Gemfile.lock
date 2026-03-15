@@ -125,6 +125,8 @@ GEM
     et-orbi (1.4.0)
       tzinfo
     ffi (1.15.5)
+    foreman (0.90.0)
+      thor (~> 1.4)
     fugit (1.12.1)
       et-orbi (~> 1.4)
       raabro (~> 1.4)
@@ -354,6 +356,7 @@ DEPENDENCIES
   bootsnap
   brakeman
   debug
+  foreman
   kamal
   pg (~> 1.1)
   puma (>= 5.0)

@@ -46,6 +46,7 @@ telegram:
 说明：
 - 你如果没有启用 TDLib 加密，`encryption_key` 可以留空字符串。
 - 生产数据库连接请走 `DATABASE_URL`（见下一步），不要依赖 `credentials.db`。
+- 如果 credentials 里没有 `secret_key_base`，需要通过 `SECRET_KEY_BASE` 环境变量提供。
 
 ### Step 2) 准备环境变量
 
@@ -54,12 +55,13 @@ telegram:
 ```bash
 cat > .env <<'ENV'
 RAILS_MASTER_KEY=replace_with_your_master_key
-DATABASE_URL=postgres://rails_luoxu_api:replace_with_db_password@postgres:5432/rails_luoxu_api_production
+SECRET_KEY_BASE=replace_with_generated_secret_key_base
+DATABASE_URL=postgresql://rails_luoxu_api:replace_with_db_password@postgres:5432/rails_luoxu_api_production
 POSTGRES_DB=rails_luoxu_api_production
 POSTGRES_USER=rails_luoxu_api
 POSTGRES_PASSWORD=replace_with_db_password
 # 可选：compose 默认使用 PGroonga 镜像；如需固定版本可覆盖
-# POSTGRES_IMAGE=pgroonga/pgroonga:your-tag
+# POSTGRES_IMAGE=groonga/pgroonga:your-tag
 # 本地目录挂载（bind mount）
 POSTGRES_DATA_DIR=./.docker/postgres
 RAILS_STORAGE_DIR=./.docker/storage
@@ -69,6 +71,12 @@ RAILS_STORAGE_DIR=./.docker/storage
 # 可选：未启用加密时可不填
 # TDLIB_DATABASE_ENCRYPTION_KEY=
 ENV
+```
+
+如果你还没有 `SECRET_KEY_BASE`，可先生成一个：
+
+```bash
+openssl rand -hex 64
 ```
 
 创建本地挂载目录：
@@ -88,7 +96,7 @@ mkdir -p ./.docker/postgres ./.docker/storage
 docker compose -f docker-compose.yml.example up -d
 ```
 
-容器启动时会自动执行 `bin/rails db:prepare`。
+容器启动时会自动执行 `bin/rails db:prepare`，并通过 `Procfile.prod` 同时拉起 Web 和 Solid Queue job 进程。
 
 ### Step 4) 初始化首个管理员（一次性）
 
@@ -108,6 +116,7 @@ curl http://127.0.0.1/up
 ## 2. 运行细节
 
 - `RAILS_MASTER_KEY`：用于解密 `config/credentials.yml.enc`。
+- `SECRET_KEY_BASE`：如果没有放进 credentials，生产环境必须显式提供。
 - `DATABASE_URL`：生产数据库连接（当前项目 production 配置优先使用它）。
 - `TDLIB_DATABASE_ENCRYPTION_KEY`：可选。只有你启用 TDLib 数据库加密时才需要。
 - TDLib 动态库（Docker/Linux）：
