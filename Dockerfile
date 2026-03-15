@@ -106,7 +106,7 @@ FROM base
 COPY --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
 COPY --from=build /rails /rails
 COPY --from=tdlib-build /out/deps/ /usr/local/lib/tdlib-deps/
-ENV LD_LIBRARY_PATH="/usr/local/lib/tdlib-deps:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/lib/tdlib-deps"
 
 # Run and own only the runtime files as a non-root user for security
 RUN groupadd --system --gid 1000 rails && \
