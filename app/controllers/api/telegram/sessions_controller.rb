@@ -50,6 +50,15 @@ module Api
       end
 
       def watch_targets
+        if request.get?
+          render json: watch_targets_payload(@account)
+          return
+        end
+
+        update_watch_targets
+      end
+
+      def update_watch_targets
         chat_ids = Array(params.require(:chat_ids)).map(&:to_i).uniq
         profile = TelegramAccountProfile.find_or_initialize_by(telegram_account_id: @account.id)
         profile.save! if profile.new_record?
@@ -62,7 +71,7 @@ module Api
           limit_per_chat: full_sync ? nil : params[:message_limit],
           wait_seconds: params[:wait_seconds]
         )
-        render json: { session_id: @account.uuid, watched_chat_ids: chat_ids, message_sync: sync }
+        render json: watch_targets_payload(@account, watched_chat_ids: chat_ids).merge(message_sync: sync)
       end
 
       def sync_chats
@@ -144,6 +153,27 @@ module Api
           last_name: profile.last_name,
           phone_number: profile.phone_number,
           watched_chat_ids: profile.watched_chat_ids
+        }
+      end
+
+      def watch_targets_payload(account, watched_chat_ids: nil)
+        chat_ids = Array(watched_chat_ids || account.watch_targets.order(:td_chat_id).pluck(:td_chat_id)).map(&:to_i).uniq.sort
+        chats_by_id = TelegramChat.where(telegram_account_id: account.id, td_chat_id: chat_ids)
+                                 .order(:td_chat_id, updated_at: :desc)
+                                 .group_by(&:td_chat_id)
+
+        {
+          session_id: account.uuid,
+          watched_chat_ids: chat_ids,
+          watched_chats: chat_ids.map do |chat_id|
+            chat = chats_by_id[chat_id]&.first
+            {
+              td_chat_id: chat_id,
+              title: chat&.title,
+              chat_type: chat&.chat_type,
+              synced_at: chat&.synced_at
+            }
+          end
         }
       end
 

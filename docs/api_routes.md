@@ -1,9 +1,10 @@
 # API Routes
 
-Generated at: 2026-03-11T07:45:40Z
+Generated at: 2026-03-16T00:00:00Z
 
 | Method | Path | Action |
 |---|---|---|
+| `GET` | `/up(.:format)` | `rails/health#show` |
 | `POST` | `/api/auth/login(.:format)` | `api/auth#login` |
 | `POST` | `/api/auth/register(.:format)` | `api/auth#register` |
 | `PATCH` | `/api/auth/users/:id/chat_ids(.:format)` | `api/auth#update_chat_ids` |
@@ -20,6 +21,7 @@ Generated at: 2026-03-11T07:45:40Z
 | `POST` | `/api/telegram/sessions/:id/code(.:format)` | `api/telegram/sessions#code` |
 | `POST` | `/api/telegram/sessions/:id/password(.:format)` | `api/telegram/sessions#password` |
 | `POST` | `/api/telegram/sessions/:id/phone(.:format)` | `api/telegram/sessions#phone` |
+| `GET` | `/api/telegram/sessions/:id/watch_targets(.:format)` | `api/telegram/sessions#watch_targets` |
 | `POST` | `/api/telegram/sessions/:id/sync_chats(.:format)` | `api/telegram/sessions#sync_chats` |
 | `POST` | `/api/telegram/sessions/:id/sync_group_members(.:format)` | `api/telegram/sessions#sync_group_members` |
 | `POST` | `/api/telegram/sessions/:id/sync_messages(.:format)` | `api/telegram/sessions#sync_messages` |

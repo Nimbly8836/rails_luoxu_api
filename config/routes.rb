@@ -22,6 +22,7 @@ Rails.application.routes.draw do
           post :phone
           post :code
           post :password
+          get :watch_targets
           patch :watch_targets
           post :sync_chats
           post :sync_messages

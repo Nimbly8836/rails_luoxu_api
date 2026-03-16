@@ -427,6 +427,7 @@ module Telegram
         connected_at: (state == :ready ? Time.current : nil),
         last_error: nil
       )
+      schedule_transient_cleanup_if_needed(state)
       fetch_me if state == :ready
     end
 
@@ -503,6 +504,17 @@ module Telegram
     def capture_error(error)
       @mutex.synchronize { @last_error = error.message }
       persist_account(last_error: error.message)
+    end
+
+    def schedule_transient_cleanup_if_needed(state)
+      return unless state == :closed
+
+      Thread.new do
+        sleep(0.1)
+        Telegram::Runtime.cleanup_transient_account!(@account_id, reason: "closed_without_login_progress")
+      rescue StandardError => e
+        Rails.logger.warn("Failed scheduling transient cleanup for account #{@id}: #{e.message}")
+      end
     end
 
     def persist_account(attrs)
