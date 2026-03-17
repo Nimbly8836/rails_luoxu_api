@@ -6,7 +6,6 @@ module Api
   class MeController < ApplicationController
     before_action :authenticate_system_user!
 
-    TDLIB_MESSAGE_ID_SHIFT = 20
     TD_SUPERGROUP_CHAT_ABS_PREFIX = 1_000_000_000_000
 
     def chats
@@ -129,13 +128,12 @@ module Api
 
     def serialize_message(message, member_map)
       member = member_map[[ message.td_chat_id, message.td_sender_id ]]
-      post_id = telegram_post_id(message.td_message_id)
+      post_id = message.message_id
       channel_id = telegram_privatepost_channel_id(message.td_chat_id)
       privatepost_url = build_privatepost_url(channel_id:, post_id:)
 
       {
         td_chat_id: message.td_chat_id,
-        td_message_id: message.td_message_id,
         message_id: post_id,
         tg_privatepost_channel_id: channel_id,
         tg_privatepost_url: privatepost_url,
@@ -175,13 +173,6 @@ module Api
         .filter_map { |value| Integer(value, exception: false) }
         .reject(&:zero?)
         .uniq
-    end
-
-    def telegram_post_id(td_message_id)
-      message_id = td_message_id.to_i
-      return nil if message_id <= 0
-
-      message_id >> TDLIB_MESSAGE_ID_SHIFT
     end
 
     def telegram_privatepost_channel_id(td_chat_id)

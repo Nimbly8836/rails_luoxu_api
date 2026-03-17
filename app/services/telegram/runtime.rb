@@ -86,6 +86,10 @@ module Telegram
         true
       end
 
+      def delete_account!(account, reason: "manual_purge")
+        destroy_account!(account, reason:, force: true)
+      end
+
       private
 
       def db_dir(uuid)

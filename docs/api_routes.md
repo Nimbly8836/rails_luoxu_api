@@ -17,6 +17,7 @@ Generated at: 2026-03-16T00:00:00Z
 | `GET` | `/api/telegram/sessions(.:format)` | `api/telegram/sessions#index` |
 | `POST` | `/api/telegram/sessions(.:format)` | `api/telegram/sessions#create` |
 | `DELETE` | `/api/telegram/sessions/:id(.:format)` | `api/telegram/sessions#destroy` |
+| `DELETE` | `/api/telegram/sessions/:id/purge(.:format)` | `api/telegram/sessions#purge` |
 | `GET` | `/api/telegram/sessions/:id(.:format)` | `api/telegram/sessions#show` |
 | `POST` | `/api/telegram/sessions/:id/code(.:format)` | `api/telegram/sessions#code` |
 | `POST` | `/api/telegram/sessions/:id/password(.:format)` | `api/telegram/sessions#password` |

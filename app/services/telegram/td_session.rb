@@ -184,10 +184,12 @@ module Telegram
 
       ids.each do |chat_id|
         chat_known_to_account = TelegramChat.exists?(telegram_account_id: @account_id, td_chat_id: chat_id)
-        existing_max_message_id = TelegramMessage.where(
+        message_scope = TelegramMessage.where(
           telegram_account_id: @account_id,
           td_chat_id: chat_id
-        ).maximum(:td_message_id).to_i
+        )
+        existing_max_message_id = message_scope.maximum(:message_id).to_i
+        existing_min_message_id = message_scope.minimum(:message_id).to_i
         chat_title = nil
         last_message_id = nil
         precheck_error = nil
@@ -238,21 +240,21 @@ module Telegram
           chat_fetched += fetched_count
 
           message_bundles = extract_history_messages(response)
-          message_bundles = message_bundles.sort_by { |bundle| -bundle[:message][:td_message_id].to_i }
+          message_bundles = message_bundles.sort_by { |bundle| -bundle[:message][:message_id].to_i }
           chat_parsed += message_bundles.size
           break if message_bundles.empty?
 
           message_bundles = message_bundles.reject do |bundle|
-            message_id = bundle[:message][:td_message_id].to_i
+            message_id = bundle[:message][:message_id].to_i
             duplicate = seen_message_ids.key?(message_id)
             seen_message_ids[message_id] = true
             duplicate
           end
 
           reached_existing_boundary = existing_max_message_id.positive? &&
-            message_bundles.any? { |bundle| bundle[:message][:td_message_id].to_i <= existing_max_message_id }
+            message_bundles.any? { |bundle| bundle[:message][:message_id].to_i <= existing_max_message_id }
           message_bundles = message_bundles.select do |bundle|
-            existing_max_message_id <= 0 || bundle[:message][:td_message_id].to_i > existing_max_message_id
+            existing_max_message_id <= 0 || bundle[:message][:message_id].to_i > existing_max_message_id
           end
           break if message_bundles.empty?
 
@@ -268,24 +270,42 @@ module Telegram
           result[:upserted] += upserted
           chat_upserted += upserted
 
-          oldest_message_id = message_bundles.map { |bundle| bundle[:message][:td_message_id].to_i }.min.to_i
-          break if oldest_message_id <= 0
+          oldest_td_message_id = message_bundles.map { |bundle| bundle[:td_message_id].to_i }.min.to_i
+          break if oldest_td_message_id <= 0
           break if reached_existing_boundary
 
-          if oldest_message_id == from_message_id
+          if oldest_td_message_id == from_message_id
             stalled_pages += 1
             break if stalled_pages >= 2
           else
             stalled_pages = 0
           end
 
-          from_message_id = oldest_message_id
+          from_message_id = oldest_td_message_id
           sleep(delay) if delay.positive?
         end
+
+        # Backfill older history when local data starts above 1.
+        # This helps recover early messages after prior partial syncs.
+        backfill = backfill_older_messages_for_chat(
+          chat_id:,
+          existing_min_message_id:,
+          per_chat_limit:,
+          batch_limit:,
+          delay:
+        )
+        result[:upserted] += backfill[:upserted]
+        chat_upserted += backfill[:upserted]
+        chat_fetched += backfill[:fetched]
+        chat_parsed += backfill[:parsed]
+        batches += backfill[:batches]
+        existing_min_message_id = backfill[:new_min_message_id] if backfill[:new_min_message_id].positive?
+
         result[:details] << {
           chat_id:,
           chat_known_to_account:,
           existing_max_message_id: existing_max_message_id.positive? ? existing_max_message_id : nil,
+          existing_min_message_id: existing_min_message_id.positive? ? existing_min_message_id : nil,
           chat_title:,
           last_message_id:,
           precheck_error:,
@@ -294,6 +314,10 @@ module Telegram
           fetched: chat_fetched,
           parsed: chat_parsed,
           upserted: chat_upserted,
+          backfill: {
+            attempted: backfill[:attempted],
+            reached_start: backfill[:reached_start]
+          },
           first_response: first_response_info
         }
       rescue StandardError => e
@@ -310,11 +334,93 @@ module Telegram
           fetched: chat_fetched,
           parsed: chat_parsed,
           upserted: chat_upserted,
+          backfill: { attempted: false, reached_start: false },
           first_response: first_response_info,
           error: e.message
         }
       end
 
+      result
+    end
+
+    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, per_chat_limit:, batch_limit:, delay:)
+      result = {
+        attempted: false,
+        reached_start: false,
+        upserted: 0,
+        fetched: 0,
+        parsed: 0,
+        batches: 0,
+        new_min_message_id: existing_min_message_id.to_i
+      }
+      return result if per_chat_limit.present?
+
+      min_message_id = existing_min_message_id.to_i
+      return result if min_message_id <= 1
+
+      from_message_id = encode_td_message_id(chat_id:, message_id: min_message_id)
+      return result if from_message_id <= 0
+
+      result[:attempted] = true
+      seen_message_ids = {}
+      stalled_pages = 0
+      max_pages = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BACKFILL_MAX_PAGES", "50").to_i.clamp(1, 500)
+      pages = 0
+
+      loop do
+        break if pages >= max_pages
+
+        response = fetch_history_messages_page(
+          chat_id:,
+          from_message_id:,
+          offset: 0,
+          limit: batch_limit
+        )
+        pages += 1
+        result[:batches] += 1
+        result[:fetched] += extract_history_count(response)
+
+        message_bundles = extract_history_messages(response)
+        result[:parsed] += message_bundles.size
+        break if message_bundles.empty?
+
+        message_bundles = message_bundles.sort_by { |bundle| -bundle[:message][:message_id].to_i }
+        message_bundles = message_bundles.reject do |bundle|
+          message_id = bundle[:message][:message_id].to_i
+          duplicate = seen_message_ids.key?(message_id)
+          seen_message_ids[message_id] = true
+          duplicate
+        end
+        message_bundles = message_bundles.select { |bundle| bundle[:message][:message_id].to_i < min_message_id }
+        break if message_bundles.empty?
+
+        upsert_usernames_from(message_bundles)
+        upserted = upsert_messages_bulk(message_bundles.map { |bundle| bundle[:message] })
+        result[:upserted] += upserted
+
+        current_min = message_bundles.map { |bundle| bundle[:message][:message_id].to_i }.min.to_i
+        min_message_id = current_min if current_min.positive? && current_min < min_message_id
+
+        oldest_td_message_id = message_bundles.map { |bundle| bundle[:td_message_id].to_i }.min.to_i
+        break if oldest_td_message_id <= 0
+
+        if min_message_id <= 1
+          result[:reached_start] = true
+          break
+        end
+
+        if oldest_td_message_id == from_message_id
+          stalled_pages += 1
+          break if stalled_pages >= 2
+        else
+          stalled_pages = 0
+        end
+
+        from_message_id = oldest_td_message_id
+        sleep(delay) if delay.positive?
+      end
+
+      result[:new_min_message_id] = min_message_id
       result
     end
 
@@ -835,7 +941,7 @@ module Telegram
 
       TelegramMessage.upsert_all(
         messages.map { |attrs| attrs.merge(telegram_account_id: @account_id) },
-        unique_by: :index_telegram_messages_on_account_chat_message
+        unique_by: :index_telegram_messages_on_account_chat_message_id
       )
       messages.size
     end
@@ -851,9 +957,12 @@ module Telegram
 
       sender = raw["sender_id"].is_a?(Hash) ? raw["sender_id"] : {}
       sender_is_user = sender["@type"].to_s == "messageSenderUser"
+      decoded_message_id = decode_message_id_from_td(td_message_id)
+      return nil if decoded_message_id.blank? || decoded_message_id.to_i <= 0
+
       message_attrs = {
         td_chat_id: td_chat_id.to_i,
-        td_message_id: td_message_id.to_i,
+        message_id: decoded_message_id.to_i,
         td_sender_id: sender["user_id"] || sender["chat_id"],
         sender_name: resolve_sender_name(sender),
         message_at: Time.at(date.to_i),
@@ -861,9 +970,34 @@ module Telegram
       }
 
       {
+        td_message_id: td_message_id.to_i,
         message: message_attrs,
         username: build_username_attrs(message_attrs, sender_is_user:)
       }
+    end
+
+    def decode_message_id_from_td(td_message_id)
+      value = td_message_id.to_i
+      return nil if value <= 0
+
+      # For channel/supergroup posts TDLib IDs are 300000000000 + post_id.
+      return value - 300_000_000_000 if value >= 300_000_000_000 && value < 400_000_000_000
+
+      shifted = value >> 20
+      return shifted if shifted.positive?
+
+      value
+    end
+
+    def encode_td_message_id(chat_id:, message_id:)
+      value = message_id.to_i
+      return 0 if value <= 0
+
+      # Supergroup/channel: td_message_id = 300000000000 + message_id
+      return 300_000_000_000 + value if chat_id.to_i.abs >= 1_000_000_000_000
+
+      # Fallback for non-channel chat ids.
+      value << 20
     end
 
     def resolve_sender_name(sender)

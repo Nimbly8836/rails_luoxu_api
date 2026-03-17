@@ -19,6 +19,7 @@ Rails.application.routes.draw do
       resources :chats, only: %i[index], controller: "chats"
       resources :sessions, only: %i[index create show destroy], controller: "sessions" do
         member do
+          delete :purge
           post :phone
           post :code
           post :password

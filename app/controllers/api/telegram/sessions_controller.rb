@@ -4,9 +4,12 @@ module Api
   module Telegram
     class SessionsController < ApplicationController
       before_action :authenticate_system_user!
-      before_action :find_account, only: %i[show phone code password destroy watch_targets sync_chats sync_messages sync_group_members]
+      before_action :find_account, only: %i[show phone code password destroy purge watch_targets sync_chats sync_messages sync_group_members]
 
       rescue_from ::Telegram::TdSession::InvalidStateError, with: :render_invalid_state
+      rescue_from ActionController::ParameterMissing, with: :render_bad_request
+      rescue_from ArgumentError, with: :render_unprocessable
+      rescue_from StandardError, with: :render_internal_error
 
       def index
         accounts = TelegramAccount.includes(:profile, :telegram_chats).order(created_at: :desc).limit(100)
@@ -46,6 +49,16 @@ module Api
       def destroy
         @account.update!(enabled: false, disabled_at: Time.current, state: "disabled")
         ::Telegram::Runtime.stop(@account.uuid)
+        head :no_content
+      end
+
+      def purge
+        if account_ready?
+          render json: { error: "Cannot purge a ready account. Disable or move it out of ready state first." }, status: :unprocessable_entity
+          return
+        end
+
+        ::Telegram::Runtime.delete_account!(@account, reason: "manual_purge")
         head :no_content
       end
 
@@ -124,6 +137,11 @@ module Api
         session ? session.snapshot : persisted_snapshot
       end
 
+      def account_ready?
+        snapshot_state = current_snapshot[:state].to_s
+        snapshot_state == "ready" || @account.state.to_s == "ready"
+      end
+
       def persisted_snapshot
         account_snapshot(@account)
       end
@@ -179,6 +197,23 @@ module Api
 
       def render_invalid_state(error)
         render json: { error: error.message }, status: :unprocessable_entity
+      end
+
+      def render_bad_request(error)
+        render json: { error: error.message }, status: :bad_request
+      end
+
+      def render_unprocessable(error)
+        render json: { error: error.message }, status: :unprocessable_entity
+      end
+
+      def render_internal_error(error)
+        Rails.logger.error(
+          "Telegram sessions API error request_id=#{request.request_id} " \
+          "path=#{request.path} error_class=#{error.class} error=#{error.message}"
+        )
+        Rails.logger.error(error.backtrace&.first(10)&.join("\n")) if error.backtrace.present?
+        render json: { error: error.message, request_id: request.request_id }, status: :internal_server_error
       end
     end
   end

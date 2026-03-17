@@ -438,6 +438,34 @@ curl -X POST 'http://127.0.0.1/api/telegram/sessions?use_test_dc=false' \
 - 说明：禁用并断开会话
 - 成功响应：`204 No Content`
 
+### DELETE `/api/telegram/sessions/:id/purge`
+
+- 鉴权：是
+- 说明：物理删除会话（删除数据库记录和 tdlib 本地存储）
+
+路径参数：
+
+| 参数名 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | string(uuid) | 是 | 会话 ID |
+
+约束：
+
+- 仅允许删除当前状态非 `ready` 的账号。
+- 若账号当前为 `ready`，返回 `422 Unprocessable Entity`。
+
+成功响应：
+
+- `204 No Content`
+
+失败响应示例（ready 状态）：
+
+```json
+{
+  "error": "Cannot purge a ready account. Disable or move it out of ready state first."
+}
+```
+
 ### POST `/api/telegram/sessions/:id/phone`
 
 - 鉴权：是
