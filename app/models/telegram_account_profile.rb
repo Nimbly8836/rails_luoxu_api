@@ -81,6 +81,10 @@ class TelegramAccountProfile < ApplicationRecord
 
   private
 
+  def normalize_chat_ids(chat_ids)
+    self.class.normalize_chat_ids(chat_ids)
+  end
+
   def upsert_watch_targets!(account_id, chat_ids)
     return if chat_ids.empty?
 
