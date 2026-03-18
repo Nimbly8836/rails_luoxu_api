@@ -190,6 +190,8 @@ module Telegram
         )
         existing_max_message_id = message_scope.maximum(:message_id).to_i
         existing_min_message_id = message_scope.minimum(:message_id).to_i
+        existing_max_td_message_id = supports_td_message_id_storage? ? message_scope.maximum(:td_message_id).to_i : 0
+        existing_min_td_message_id = supports_td_message_id_storage? ? message_scope.minimum(:td_message_id).to_i : 0
         chat_title = nil
         last_message_id = nil
         precheck_error = nil
@@ -251,11 +253,19 @@ module Telegram
             duplicate
           end
 
-          reached_existing_boundary = existing_max_message_id.positive? &&
-            message_bundles.any? { |bundle| bundle[:message][:message_id].to_i <= existing_max_message_id }
-          message_bundles = message_bundles.select do |bundle|
-            existing_max_message_id <= 0 || bundle[:message][:message_id].to_i > existing_max_message_id
-          end
+          reached_existing_boundary = if existing_max_td_message_id.positive?
+                                        message_bundles.any? { |bundle| bundle[:td_message_id].to_i <= existing_max_td_message_id }
+                                      else
+                                        existing_max_message_id.positive? &&
+                                          message_bundles.any? { |bundle| bundle[:message][:message_id].to_i <= existing_max_message_id }
+                                      end
+          message_bundles = if existing_max_td_message_id.positive?
+                              message_bundles.select { |bundle| bundle[:td_message_id].to_i > existing_max_td_message_id }
+                            else
+                              message_bundles.select do |bundle|
+                                existing_max_message_id <= 0 || bundle[:message][:message_id].to_i > existing_max_message_id
+                              end
+                            end
           break if message_bundles.empty?
 
           if per_chat_limit
@@ -290,6 +300,7 @@ module Telegram
         backfill = backfill_older_messages_for_chat(
           chat_id:,
           existing_min_message_id:,
+          existing_min_td_message_id:,
           per_chat_limit:,
           batch_limit:,
           delay:
@@ -306,6 +317,8 @@ module Telegram
           chat_known_to_account:,
           existing_max_message_id: existing_max_message_id.positive? ? existing_max_message_id : nil,
           existing_min_message_id: existing_min_message_id.positive? ? existing_min_message_id : nil,
+          existing_max_td_message_id: existing_max_td_message_id.positive? ? existing_max_td_message_id : nil,
+          existing_min_td_message_id: existing_min_td_message_id.positive? ? existing_min_td_message_id : nil,
           chat_title:,
           last_message_id:,
           precheck_error:,
@@ -343,7 +356,7 @@ module Telegram
       result
     end
 
-    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, per_chat_limit:, batch_limit:, delay:)
+    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, existing_min_td_message_id:, per_chat_limit:, batch_limit:, delay:)
       result = {
         attempted: false,
         reached_start: false,
@@ -356,14 +369,15 @@ module Telegram
       return result if per_chat_limit.present?
 
       min_message_id = existing_min_message_id.to_i
-      return result if min_message_id <= 1
+      min_td_message_id = existing_min_td_message_id.to_i
+      return result if min_message_id <= 1 && min_td_message_id <= 0
 
       result[:attempted] = true
       seen_message_ids = {}
       stalled_pages = 0
       max_pages = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BACKFILL_MAX_PAGES", "50").to_i.clamp(1, 500)
       pages = 0
-      from_message_id = 0
+      from_message_id = min_td_message_id.positive? ? min_td_message_id : 0
 
       loop do
         break if pages >= max_pages
@@ -392,7 +406,11 @@ module Telegram
           seen_message_ids[message_id] = true
           duplicate
         end
-        insertable_bundles = message_bundles.select { |bundle| bundle[:message][:message_id].to_i < min_message_id }
+        insertable_bundles = if min_td_message_id.positive?
+                              message_bundles.select { |bundle| bundle[:td_message_id].to_i < min_td_message_id }
+                            else
+                              message_bundles.select { |bundle| bundle[:message][:message_id].to_i < min_message_id }
+                            end
 
         if insertable_bundles.any?
           upsert_usernames_from(insertable_bundles)
@@ -401,9 +419,13 @@ module Telegram
 
           current_min = insertable_bundles.map { |bundle| bundle[:message][:message_id].to_i }.min.to_i
           min_message_id = current_min if current_min.positive? && current_min < min_message_id
+          if min_td_message_id.positive?
+            current_min_td = insertable_bundles.map { |bundle| bundle[:td_message_id].to_i }.min.to_i
+            min_td_message_id = current_min_td if current_min_td.positive? && current_min_td < min_td_message_id
+          end
         end
 
-        if min_message_id <= 1
+        if min_message_id <= 1 && (!min_td_message_id.positive? || min_td_message_id <= 1)
           result[:reached_start] = true
           break
         end
@@ -940,7 +962,7 @@ module Telegram
 
       TelegramMessage.upsert_all(
         messages.map { |attrs| attrs.merge(telegram_account_id: @account_id) },
-        unique_by: :index_telegram_messages_on_account_chat_message_id
+        unique_by: telegram_messages_unique_index_name
       )
       messages.size
     end
@@ -967,6 +989,7 @@ module Telegram
         message_at: Time.at(date.to_i),
         text: extract_message_text(raw)
       }
+      message_attrs[:td_message_id] = td_message_id.to_i if supports_td_message_id_storage?
 
       {
         td_message_id: td_message_id.to_i,
@@ -979,6 +1002,9 @@ module Telegram
       value = td_message_id.to_i
       return nil if value <= 0
 
+      # Some TDLib ids are stored as plain message_id << 20.
+      return value >> 20 if (value % (1 << 20)).zero?
+
       # For channel/supergroup posts TDLib IDs are 300000000000 + post_id.
       return value - 300_000_000_000 if value >= 300_000_000_000 && value < 400_000_000_000
 
@@ -986,6 +1012,16 @@ module Telegram
       return shifted if shifted.positive?
 
       value
+    end
+
+    def supports_td_message_id_storage?
+      @supports_td_message_id_storage ||= TelegramMessage.column_names.include?("td_message_id")
+    end
+
+    def telegram_messages_unique_index_name
+      return :index_telegram_messages_on_account_chat_message if supports_td_message_id_storage?
+
+      :index_telegram_messages_on_account_chat_message_id
     end
 
     def resolve_sender_name(sender)
