@@ -358,14 +358,12 @@ module Telegram
       min_message_id = existing_min_message_id.to_i
       return result if min_message_id <= 1
 
-      from_message_id = encode_td_message_id(chat_id:, message_id: min_message_id)
-      return result if from_message_id <= 0
-
       result[:attempted] = true
       seen_message_ids = {}
       stalled_pages = 0
       max_pages = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BACKFILL_MAX_PAGES", "50").to_i.clamp(1, 500)
       pages = 0
+      from_message_id = 0
 
       loop do
         break if pages >= max_pages
@@ -385,24 +383,25 @@ module Telegram
         break if message_bundles.empty?
 
         message_bundles = message_bundles.sort_by { |bundle| -bundle[:message][:message_id].to_i }
+        oldest_td_message_id = message_bundles.map { |bundle| bundle[:td_message_id].to_i }.min.to_i
+        break if oldest_td_message_id <= 0
+
         message_bundles = message_bundles.reject do |bundle|
           message_id = bundle[:message][:message_id].to_i
           duplicate = seen_message_ids.key?(message_id)
           seen_message_ids[message_id] = true
           duplicate
         end
-        message_bundles = message_bundles.select { |bundle| bundle[:message][:message_id].to_i < min_message_id }
-        break if message_bundles.empty?
+        insertable_bundles = message_bundles.select { |bundle| bundle[:message][:message_id].to_i < min_message_id }
 
-        upsert_usernames_from(message_bundles)
-        upserted = upsert_messages_bulk(message_bundles.map { |bundle| bundle[:message] })
-        result[:upserted] += upserted
+        if insertable_bundles.any?
+          upsert_usernames_from(insertable_bundles)
+          upserted = upsert_messages_bulk(insertable_bundles.map { |bundle| bundle[:message] })
+          result[:upserted] += upserted
 
-        current_min = message_bundles.map { |bundle| bundle[:message][:message_id].to_i }.min.to_i
-        min_message_id = current_min if current_min.positive? && current_min < min_message_id
-
-        oldest_td_message_id = message_bundles.map { |bundle| bundle[:td_message_id].to_i }.min.to_i
-        break if oldest_td_message_id <= 0
+          current_min = insertable_bundles.map { |bundle| bundle[:message][:message_id].to_i }.min.to_i
+          min_message_id = current_min if current_min.positive? && current_min < min_message_id
+        end
 
         if min_message_id <= 1
           result[:reached_start] = true
@@ -987,17 +986,6 @@ module Telegram
       return shifted if shifted.positive?
 
       value
-    end
-
-    def encode_td_message_id(chat_id:, message_id:)
-      value = message_id.to_i
-      return 0 if value <= 0
-
-      # Supergroup/channel: td_message_id = 300000000000 + message_id
-      return 300_000_000_000 + value if chat_id.to_i.abs >= 1_000_000_000_000
-
-      # Fallback for non-channel chat ids.
-      value << 20
     end
 
     def resolve_sender_name(sender)
