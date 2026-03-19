@@ -224,8 +224,7 @@ module Telegram
       per_chat_limit = limit_per_chat.present? ? limit_per_chat.to_i : nil
       per_chat_limit = nil if per_chat_limit&.<= 0
       batch_limit = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BATCH_LIMIT", "100").to_i.clamp(1, 500)
-      delay = wait_seconds.nil? ? ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "5").to_f : wait_seconds.to_f
-      delay = 0.0 if delay.negative?
+      delay = normalize_wait_seconds(wait_seconds, default: default_message_sync_wait_seconds)
       result = { chats: ids.size, upserted: 0, failed: 0, errors: [], details: [] }
 
       ids.each do |chat_id|
@@ -268,7 +267,8 @@ module Telegram
             chat_id:,
             from_message_id:,
             offset: 0,
-            limit: batch_limit
+            limit: batch_limit,
+            retry_wait_seconds: delay
           )
           batches += 1
           fetched_count = extract_history_count(response)
@@ -279,7 +279,8 @@ module Telegram
               chat_id:,
               from_message_id: 0,
               offset: 0,
-              limit: batch_limit
+              limit: batch_limit,
+              retry_wait_seconds: delay
             )
             fetched_count = extract_history_count(response)
             mode = "search" if fetched_count.positive?
@@ -301,17 +302,17 @@ module Telegram
 
           reached_existing_boundary = if existing_max_td_message_id.positive?
                                         message_bundles.any? { |bundle| bundle[:td_message_id].to_i <= existing_max_td_message_id }
-                                      else
+          else
                                         existing_max_message_id.positive? &&
                                           message_bundles.any? { |bundle| bundle[:message][:message_id].to_i <= existing_max_message_id }
-                                      end
+          end
           message_bundles = if existing_max_td_message_id.positive?
                               message_bundles.select { |bundle| bundle[:td_message_id].to_i > existing_max_td_message_id }
-                            else
+          else
                               message_bundles.select do |bundle|
                                 existing_max_message_id <= 0 || bundle[:message][:message_id].to_i > existing_max_message_id
                               end
-                            end
+          end
           break if message_bundles.empty?
 
           if per_chat_limit
@@ -454,9 +455,9 @@ module Telegram
         end
         insertable_bundles = if min_td_message_id.positive?
                               message_bundles.select { |bundle| bundle[:td_message_id].to_i < min_td_message_id }
-                            else
+        else
                               message_bundles.select { |bundle| bundle[:message][:message_id].to_i < min_message_id }
-                            end
+        end
 
         if insertable_bundles.any?
           upsert_usernames_from(insertable_bundles)
@@ -959,8 +960,8 @@ module Telegram
       nil
     end
 
-    def fetch_history_messages_page(chat_id:, from_message_id:, offset:, limit:)
-      with_td_timeout_retry(operation: "get_chat_history", chat_id:, from_message_id:) do
+    def fetch_history_messages_page(chat_id:, from_message_id:, offset:, limit:, retry_wait_seconds: nil)
+      with_td_timeout_retry(operation: "get_chat_history", chat_id:, from_message_id:, wait_seconds: retry_wait_seconds) do
         @client.get_chat_history(
           chat_id:,
           from_message_id:,
@@ -971,8 +972,8 @@ module Telegram
       end
     end
 
-    def fetch_search_messages_page(chat_id:, from_message_id:, offset:, limit:)
-      with_td_timeout_retry(operation: "search_chat_messages", chat_id:, from_message_id:) do
+    def fetch_search_messages_page(chat_id:, from_message_id:, offset:, limit:, retry_wait_seconds: nil)
+      with_td_timeout_retry(operation: "search_chat_messages", chat_id:, from_message_id:, wait_seconds: retry_wait_seconds) do
         @client.search_chat_messages(
           chat_id:,
           query: "",
@@ -1110,9 +1111,9 @@ module Telegram
       end
     end
 
-    def with_td_timeout_retry(operation:, chat_id:, from_message_id:)
+    def with_td_timeout_retry(operation:, chat_id:, from_message_id:, wait_seconds: nil)
       retries = ENV.fetch("TELEGRAM_HISTORY_TIMEOUT_RETRIES", "3").to_i.clamp(0, 10)
-      wait_seconds = ENV.fetch("TELEGRAM_HISTORY_TIMEOUT_RETRY_WAIT_SECONDS", "0.5").to_f
+      retry_wait_seconds = normalize_wait_seconds(wait_seconds, default: default_history_timeout_retry_wait_seconds)
       attempts = 0
 
       begin
@@ -1126,9 +1127,22 @@ module Telegram
           "Retry #{operation} for account #{@id} chat=#{chat_id} from_message_id=#{from_message_id} " \
           "attempt=#{attempts} error=#{e.message}"
         )
-        sleep(wait_seconds) if wait_seconds.positive?
+        sleep(retry_wait_seconds) if retry_wait_seconds.positive?
         retry
       end
+    end
+
+    def default_message_sync_wait_seconds
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "5").to_f
+    end
+
+    def default_history_timeout_retry_wait_seconds
+      ENV.fetch("TELEGRAM_HISTORY_TIMEOUT_RETRY_WAIT_SECONDS", default_message_sync_wait_seconds.to_s).to_f
+    end
+
+    def normalize_wait_seconds(wait_seconds, default:)
+      seconds = wait_seconds.nil? ? default.to_f : wait_seconds.to_f
+      seconds.negative? ? 0.0 : seconds
     end
 
     def td_timeout_error?(error)

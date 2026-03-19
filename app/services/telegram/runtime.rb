@@ -120,7 +120,7 @@ module Telegram
 
       def purge_account_storage!(account)
         storage_root = Rails.root.join("storage").to_s
-        [account.database_directory, account.files_directory].each do |path|
+        [ account.database_directory, account.files_directory ].each do |path|
           next if path.blank?
           next unless path.start_with?("#{storage_root}/")
 

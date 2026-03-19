@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_03_17_103000) do
+ActiveRecord::Schema[8.0].define(version: 2026_03_19_121000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pgroonga"
@@ -137,7 +137,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_17_103000) do
     t.datetime "message_at", null: false
     t.text "text"
     t.string "sender_name"
-    t.bigint "message_id"
+    t.bigint "message_id", null: false
     t.index ["message_at"], name: "index_telegram_messages_on_message_at"
     t.index ["td_chat_id", "message_id"], name: "index_telegram_messages_on_td_chat_id_and_message_id"
     t.index ["td_chat_id"], name: "index_telegram_messages_on_td_chat_id"

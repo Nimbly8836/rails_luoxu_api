@@ -530,7 +530,7 @@ curl -X POST 'http://127.0.0.1/api/telegram/sessions?use_test_dc=false' \
 | `chat_ids` | integer[] | 是 | 监听群 ID 列表 |
 | `full_sync` | boolean | 否 | `true` 时不限制每群拉取条数 |
 | `message_limit` | integer | 否 | 每群消息拉取上限，`full_sync=true` 时忽略 |
-| `wait_seconds` | number | 否 | 每次请求之间的延迟 |
+| `wait_seconds` | number | 否 | 每次请求之间的延迟；消息拉取超时后的重试也使用这个间隔 |
 
 成功响应示例：
 
@@ -623,7 +623,7 @@ curl -X POST 'http://127.0.0.1/api/telegram/sessions?use_test_dc=false' \
 |---|---|---|---|
 | `chat_ids` | integer[] | 否 | 要同步的群 ID 列表 |
 | `message_limit` | integer | 否 | 每群拉取消息数上限 |
-| `wait_seconds` | number | 否 | 每次请求之间的延迟 |
+| `wait_seconds` | number | 否 | 每次请求之间的延迟；消息拉取超时后的重试也使用这个间隔 |
 
 成功响应：
 
