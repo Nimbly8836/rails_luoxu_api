@@ -7,6 +7,9 @@ module Api
     before_action :authenticate_system_user!
 
     TD_SUPERGROUP_CHAT_ABS_PREFIX = 1_000_000_000_000
+    TG_PRIVATEPOST_URL_PATTERN = %r{\Atg://privatepost\?(?:[^#]*&)?channel=(\d+)&post=(\d+)\b}.freeze
+    T_ME_C_URL_PATTERN = %r{\Ahttps?://t\.me/c/(\d+)/(\d+)(?:\?.*)?\z}.freeze
+    T_ME_PUBLIC_URL_PATTERN = %r{\Ahttps?://t\.me/[^/]+/(\d+)(?:\?.*)?\z}.freeze
 
     def chats
       permitted_ids = current_system_user.chat_accesses.pluck(:td_chat_id)
@@ -64,6 +67,7 @@ module Api
       query = params.require(:q).to_s.strip
       chat_id = params[:chat_id].to_i if params[:chat_id].present?
       user_ids = normalize_integer_list(params[:user_ids])
+      resolve_links = ActiveModel::Type::Boolean.new.cast(params[:resolve_links])
       page = params[:page].to_i
       page = 1 if page < 1
       per_page = (params[:per_page] || params[:limit] || 50).to_i.clamp(1, 200)
@@ -94,6 +98,7 @@ module Api
                         "NULL AS highlight"
       end
       messages = scope
+                 .includes(:telegram_account)
                  .select("telegram_messages.*", highlight_sql)
                  .order(message_at: :desc)
                  .offset(offset)
@@ -103,12 +108,20 @@ module Api
         group_id: messages.map(&:td_chat_id).uniq,
         uid: messages.map(&:td_sender_id).compact.uniq
       ).index_by { |row| [ row.group_id, row.uid ] }
+      message_link_sessions = {}
 
       render json: {
         page:,
         per_page:,
         total:,
-        items: messages.map { |m| serialize_message(m, member_map).merge(highlight: m.try(:highlight)) }
+        items: messages.map do |message|
+          serialize_message(
+            message,
+            member_map,
+            resolve_links:,
+            message_link_sessions:
+          ).merge(highlight: message.try(:highlight))
+        end
       }
     end
 
@@ -126,17 +139,20 @@ module Api
       }
     end
 
-    def serialize_message(message, member_map)
+    def serialize_message(message, member_map, resolve_links:, message_link_sessions:)
       member = member_map[[ message.td_chat_id, message.td_sender_id ]]
-      post_id = message.message_id
-      channel_id = telegram_privatepost_channel_id(message.td_chat_id)
-      privatepost_url = build_privatepost_url(channel_id:, post_id:)
+      resolved_link = resolve_links ? resolve_message_link_data(message, message_link_sessions:) : {}
+      channel_id = resolved_link[:channel_id] || telegram_privatepost_channel_id(message.td_chat_id)
+      post_id = resolved_link[:post_id] || message.message_id
+      privatepost_url = build_privatepost_url(channel_id:, post_id:) || resolved_link[:url]
 
       {
         td_chat_id: message.td_chat_id,
+        td_message_id: message.try(:td_message_id),
         message_id: post_id,
         tg_privatepost_channel_id: channel_id,
         tg_privatepost_url: privatepost_url,
+        telegram_message_link: resolved_link[:url],
         text: message.text,
         sender_id: message.td_sender_id,
         sender_name: member&.name.presence || message.sender_name,
@@ -189,6 +205,59 @@ module Api
       return nil if channel_id.nil? || post_id.nil?
 
       "tg://privatepost?channel=#{channel_id}&post=#{post_id}"
+    end
+
+    def resolve_message_link_data(message, message_link_sessions:)
+      td_message_id = message.try(:td_message_id).to_i
+      return {} if td_message_id <= 0
+
+      session = message_link_session_for(message, message_link_sessions:)
+      return {} if session.nil?
+
+      link = session.resolve_message_link(chat_id: message.td_chat_id, td_message_id:)
+      parse_message_link(link, fallback_channel_id: telegram_privatepost_channel_id(message.td_chat_id))
+    rescue StandardError => e
+      Rails.logger.warn("Failed resolving link for message #{message.id}: #{e.message}")
+      {}
+    end
+
+    def message_link_session_for(message, message_link_sessions:)
+      account = message.telegram_account
+      return nil if account.nil? || !account.enabled?
+
+      message_link_sessions[account.id] ||= begin
+        ::Telegram::Runtime.fetch(account.uuid) || ::Telegram::Runtime.start(account)
+      rescue StandardError => e
+        Rails.logger.warn("Failed starting session for account #{account.uuid}: #{e.message}")
+        nil
+      end
+    end
+
+    def parse_message_link(url, fallback_channel_id:)
+      return {} if url.blank?
+
+      case url
+      when TG_PRIVATEPOST_URL_PATTERN
+        {
+          url:,
+          channel_id: Regexp.last_match(1).to_i,
+          post_id: Regexp.last_match(2).to_i
+        }
+      when T_ME_C_URL_PATTERN
+        {
+          url:,
+          channel_id: Regexp.last_match(1).to_i,
+          post_id: Regexp.last_match(2).to_i
+        }
+      when T_ME_PUBLIC_URL_PATTERN
+        {
+          url:,
+          channel_id: fallback_channel_id,
+          post_id: Regexp.last_match(1).to_i
+        }
+      else
+        { url:, channel_id: fallback_channel_id }
+      end
     end
 
     def refresh_chat_members(chat_id)

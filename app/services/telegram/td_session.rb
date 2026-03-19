@@ -6,6 +6,7 @@ module Telegram
   class TdSession
     class InvalidStateError < StandardError; end
     WATCHED_CHAT_IDS_CACHE_TTL_SECONDS = [ ENV.fetch("TELEGRAM_WATCHED_CHAT_IDS_CACHE_TTL_SECONDS", "5").to_f, 0.5 ].max
+    MESSAGE_LINK_CACHE_TTL_SECONDS = [ ENV.fetch("TELEGRAM_MESSAGE_LINK_CACHE_TTL_SECONDS", "600").to_f, 1.0 ].max
 
     attr_reader :id
 
@@ -20,6 +21,7 @@ module Telegram
       @last_error = nil
       @disposed = false
       @sender_name_cache = {}
+      @message_link_cache = {}
       @watched_chat_ids_cache = {}
       @watched_chat_ids_cache_loaded_at = 0.0
       @boot_recovery_sync_enqueued = false
@@ -147,6 +149,50 @@ module Telegram
       sync_chats(limit: max_limit, force_full: force_full)
     end
 
+    def resolve_message_link(chat_id:, td_message_id:)
+      raise_if_disposed!
+
+      chat_key = chat_id.to_i
+      message_key = td_message_id.to_i
+      return nil if chat_key == 0 || message_key <= 0
+
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      cache_key = [ chat_key, message_key ]
+      cached = @mutex.synchronize do
+        entry = @message_link_cache[cache_key]
+        next nil if entry.nil?
+
+        if (now - entry[:loaded_at]) < MESSAGE_LINK_CACHE_TTL_SECONDS
+          entry[:url]
+        else
+          @message_link_cache.delete(cache_key)
+          nil
+        end
+      end
+      return cached if cached.present?
+
+      wait_until_ready!(timeout: 10)
+      response = @client.get_message_link(
+        chat_id: chat_key,
+        message_id: message_key,
+        media_timestamp: 0,
+        for_album: false,
+        in_message_thread: false
+      ).value!
+      url = extract_message_link_url(response)
+      return nil if url.blank?
+
+      @mutex.synchronize do
+        @message_link_cache[cache_key] = { url:, loaded_at: now }
+      end
+      url
+    rescue StandardError => e
+      Rails.logger.warn(
+        "Failed resolving message link for account #{@id} chat=#{chat_key} td_message_id=#{message_key}: #{e.message}"
+      )
+      nil
+    end
+
     def wait_until_ready!(timeout: 60)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
       state = nil
@@ -247,9 +293,9 @@ module Telegram
           break if message_bundles.empty?
 
           message_bundles = message_bundles.reject do |bundle|
-            message_id = bundle[:message][:message_id].to_i
-            duplicate = seen_message_ids.key?(message_id)
-            seen_message_ids[message_id] = true
+            dedupe_key = history_bundle_dedupe_key(bundle)
+            duplicate = seen_message_ids.key?(dedupe_key)
+            seen_message_ids[dedupe_key] = true
             duplicate
           end
 
@@ -401,9 +447,9 @@ module Telegram
         break if oldest_td_message_id <= 0
 
         message_bundles = message_bundles.reject do |bundle|
-          message_id = bundle[:message][:message_id].to_i
-          duplicate = seen_message_ids.key?(message_id)
-          seen_message_ids[message_id] = true
+          dedupe_key = history_bundle_dedupe_key(bundle)
+          duplicate = seen_message_ids.key?(dedupe_key)
+          seen_message_ids[dedupe_key] = true
           duplicate
         end
         insertable_bundles = if min_td_message_id.positive?
@@ -965,7 +1011,7 @@ module Telegram
       return 0 if messages.empty?
 
       deduped_messages = messages
-        .group_by { |attrs| [ attrs[:td_chat_id].to_i, attrs[:message_id].to_i ] }
+        .group_by { |attrs| upsert_message_dedupe_key(attrs) }
         .values
         .map do |rows|
           rows.max_by do |row|
@@ -1028,6 +1074,40 @@ module Telegram
       return shifted if shifted.positive?
 
       value
+    end
+
+    def extract_message_link_url(response)
+      return nil if response.nil?
+      return response.link if response.respond_to?(:link)
+
+      raw =
+        if defined?(TD::Types::Unsupported) && response.is_a?(TD::Types::Unsupported)
+          response.raw
+        elsif response.respond_to?(:to_h)
+          response.to_h
+        end
+      raw = raw.deep_stringify_keys if raw.is_a?(Hash)
+      raw.is_a?(Hash) ? raw["link"] || raw["url"] : nil
+    rescue StandardError
+      nil
+    end
+
+    def history_bundle_dedupe_key(bundle)
+      td_message_id = bundle[:td_message_id].to_i
+      if supports_td_message_id_storage? && td_message_id.positive?
+        [ bundle.dig(:message, :td_chat_id).to_i, td_message_id ]
+      else
+        [ bundle.dig(:message, :td_chat_id).to_i, bundle.dig(:message, :message_id).to_i ]
+      end
+    end
+
+    def upsert_message_dedupe_key(attrs)
+      td_message_id = attrs[:td_message_id].to_i
+      if supports_td_message_id_storage? && td_message_id.positive?
+        [ attrs[:td_chat_id].to_i, td_message_id ]
+      else
+        [ attrs[:td_chat_id].to_i, attrs[:message_id].to_i ]
+      end
     end
 
     def with_td_timeout_retry(operation:, chat_id:, from_message_id:)
