@@ -178,7 +178,7 @@ module Telegram
       per_chat_limit = limit_per_chat.present? ? limit_per_chat.to_i : nil
       per_chat_limit = nil if per_chat_limit&.<= 0
       batch_limit = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BATCH_LIMIT", "100").to_i.clamp(1, 500)
-      delay = wait_seconds.nil? ? ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "0.2").to_f : wait_seconds.to_f
+      delay = wait_seconds.nil? ? ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "5").to_f : wait_seconds.to_f
       delay = 0.0 if delay.negative?
       result = { chats: ids.size, upserted: 0, failed: 0, errors: [], details: [] }
 
@@ -914,27 +914,31 @@ module Telegram
     end
 
     def fetch_history_messages_page(chat_id:, from_message_id:, offset:, limit:)
-      @client.get_chat_history(
-        chat_id:,
-        from_message_id:,
-        offset:,
-        limit:,
-        only_local: false
-      ).value!
+      with_td_timeout_retry(operation: "get_chat_history", chat_id:, from_message_id:) do
+        @client.get_chat_history(
+          chat_id:,
+          from_message_id:,
+          offset:,
+          limit:,
+          only_local: false
+        ).value!
+      end
     end
 
     def fetch_search_messages_page(chat_id:, from_message_id:, offset:, limit:)
-      @client.search_chat_messages(
-        chat_id:,
-        query: "",
-        sender_id: nil,
-        from_message_id:,
-        offset:,
-        limit:,
-        filter: nil,
-        message_thread_id: 0,
-        saved_messages_topic_id: 0
-      ).value!
+      with_td_timeout_retry(operation: "search_chat_messages", chat_id:, from_message_id:) do
+        @client.search_chat_messages(
+          chat_id:,
+          query: "",
+          sender_id: nil,
+          from_message_id:,
+          offset:,
+          limit:,
+          filter: nil,
+          message_thread_id: 0,
+          saved_messages_topic_id: 0
+        ).value!
+      end
     end
 
     def extract_chat_last_message_id(chat)
@@ -960,11 +964,23 @@ module Telegram
     def upsert_messages_bulk(messages)
       return 0 if messages.empty?
 
+      deduped_messages = messages
+        .group_by { |attrs| [ attrs[:td_chat_id].to_i, attrs[:message_id].to_i ] }
+        .values
+        .map do |rows|
+          rows.max_by do |row|
+            [
+              row[:td_message_id].to_i,
+              row[:message_at].to_i
+            ]
+          end
+        end
+
       TelegramMessage.upsert_all(
-        messages.map { |attrs| attrs.merge(telegram_account_id: @account_id) },
+        deduped_messages.map { |attrs| attrs.merge(telegram_account_id: @account_id) },
         unique_by: telegram_messages_unique_index_name
       )
-      messages.size
+      deduped_messages.size
     end
 
     def extract_message_bundle(message)
@@ -1014,14 +1030,51 @@ module Telegram
       value
     end
 
+    def with_td_timeout_retry(operation:, chat_id:, from_message_id:)
+      retries = ENV.fetch("TELEGRAM_HISTORY_TIMEOUT_RETRIES", "3").to_i.clamp(0, 10)
+      wait_seconds = ENV.fetch("TELEGRAM_HISTORY_TIMEOUT_RETRY_WAIT_SECONDS", "0.5").to_f
+      attempts = 0
+
+      begin
+        attempts += 1
+        yield
+      rescue StandardError => e
+        raise unless td_timeout_error?(e)
+        raise if attempts > retries
+
+        Rails.logger.warn(
+          "Retry #{operation} for account #{@id} chat=#{chat_id} from_message_id=#{from_message_id} " \
+          "attempt=#{attempts} error=#{e.message}"
+        )
+        sleep(wait_seconds) if wait_seconds.positive?
+        retry
+      end
+    end
+
+    def td_timeout_error?(error)
+      error.is_a?(Timeout::Error) || error.message.to_s.include?("Timeout error")
+    end
+
     def supports_td_message_id_storage?
       @supports_td_message_id_storage ||= TelegramMessage.column_names.include?("td_message_id")
     end
 
     def telegram_messages_unique_index_name
+      return :index_telegram_messages_on_account_chat_message_id if supports_message_id_unique_index?
       return :index_telegram_messages_on_account_chat_message if supports_td_message_id_storage?
 
       :index_telegram_messages_on_account_chat_message_id
+    end
+
+    def supports_message_id_unique_index?
+      @supports_message_id_unique_index ||= ActiveRecord::Base.connection.index_exists?(
+        :telegram_messages,
+        [ :telegram_account_id, :td_chat_id, :message_id ],
+        name: "index_telegram_messages_on_account_chat_message_id",
+        unique: true
+      )
+    rescue StandardError
+      false
     end
 
     def resolve_sender_name(sender)
