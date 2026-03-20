@@ -25,7 +25,6 @@ module Telegram
       @watched_chat_ids_cache = {}
       @watched_chat_ids_cache_loaded_at = 0.0
       @boot_recovery_sync_enqueued = false
-      @watched_chat_sync_running = false
 
       @client = TD::Client.new(**client_config(account))
       subscribe_updates
@@ -51,38 +50,16 @@ module Telegram
     end
 
     def sync_messages_for_watched_chats_async(reason: "manual")
-      should_start = @mutex.synchronize do
-        next false if @watched_chat_sync_running
+      enqueue_message_sync_job(use_watched_chat_ids: true, reason:)
+    end
 
-        @watched_chat_sync_running = true
-      end
-      return unless should_start
-
-      Thread.new do
-        begin
-          state = wait_for_initial_state(timeout: 5)
-          wait_until_ready!(timeout: 30) if state == :initializing
-
-          current_state = snapshot[:state]
-          unless current_state == :ready
-            Rails.logger.info("Skip watched chat sync(#{reason}) for account #{@id}: state=#{current_state}")
-            next
-          end
-
-          chat_ids = watched_chat_ids
-          if chat_ids.empty?
-            Rails.logger.info("Skip watched chat sync(#{reason}) for account #{@id}: no watched chats")
-            next
-          end
-
-          sync = sync_messages_for_chats(chat_ids:)
-          Rails.logger.info("Watched chat sync(#{reason}) for account #{@id}: #{sync.inspect}")
-        rescue StandardError => e
-          Rails.logger.warn("Failed watched chat sync(#{reason}) for account #{@id}: #{e.message}")
-        ensure
-          @mutex.synchronize { @watched_chat_sync_running = false }
-        end
-      end
+    def sync_messages_for_chats_async(chat_ids:, limit_per_chat: nil, wait_seconds: nil, reason: "manual")
+      enqueue_message_sync_job(
+        chat_ids:,
+        limit_per_chat:,
+        wait_seconds:,
+        reason:
+      )
     end
 
     def submit_phone(phone_number:)
@@ -539,6 +516,39 @@ module Telegram
 
     private
 
+    def enqueue_message_sync_job(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:)
+      ids = Array(chat_ids).map(&:to_i).uniq.sort
+      return { enqueued: false, status: "skipped", reason: "no_chat_ids" } if !use_watched_chat_ids && ids.empty?
+
+      normalized_limit = normalize_limit_per_chat(limit_per_chat)
+      normalized_wait = normalize_wait_seconds(wait_seconds, default: default_message_sync_wait_seconds)
+      job = Telegram::MessageSyncJob.perform_later(
+        account_uuid: @id,
+        chat_ids: ids,
+        use_watched_chat_ids: use_watched_chat_ids,
+        limit_per_chat: normalized_limit,
+        wait_seconds: normalized_wait,
+        reason: reason.to_s,
+        retry_attempt: 0
+      )
+
+      {
+        enqueued: true,
+        status: "enqueued",
+        reason: reason.to_s,
+        job_id: job.job_id,
+        chat_ids: ids,
+        watched_chat_ids: use_watched_chat_ids,
+        wait_seconds: normalized_wait,
+        limit_per_chat: normalized_limit
+      }
+    end
+
+    def normalize_limit_per_chat(limit_per_chat)
+      value = limit_per_chat.present? ? limit_per_chat.to_i : nil
+      value&.positive? ? value : nil
+    end
+
     def subscribe_updates
       @client.on(TD::Types::Update::AuthorizationState) do |update|
         state = map_auth_state(update.authorization_state)
@@ -683,12 +693,12 @@ module Telegram
     def schedule_transient_cleanup_if_needed(state)
       return unless state == :closed
 
-      Thread.new do
-        sleep(0.1)
-        Telegram::Runtime.cleanup_transient_account!(@account_id, reason: "closed_without_login_progress")
-      rescue StandardError => e
-        Rails.logger.warn("Failed scheduling transient cleanup for account #{@id}: #{e.message}")
-      end
+      Telegram::TransientCleanupJob.set(wait: 1.second).perform_later(
+        account_id: @account_id,
+        reason: "closed_without_login_progress"
+      )
+    rescue StandardError => e
+      Rails.logger.warn("Failed scheduling transient cleanup for account #{@id}: #{e.message}")
     end
 
     def persist_account(attrs)
@@ -696,11 +706,15 @@ module Telegram
     end
 
     def sync_chats_async
-      Thread.new do
-        sync_chats(limit: ENV.fetch("TELEGRAM_CHAT_SYNC_LIMIT", "500").to_i)
-      rescue StandardError => e
-        capture_error(e)
-      end
+      job = Telegram::ChatSyncJob.perform_later(
+        account_uuid: @id,
+        limit: ENV.fetch("TELEGRAM_CHAT_SYNC_LIMIT", "500").to_i,
+        force_full: false
+      )
+      { enqueued: true, status: "enqueued", job_id: job.job_id }
+    rescue StandardError => e
+      capture_error(e)
+      raise
     end
 
     def sync_chats(limit:, force_full: false)
@@ -1113,7 +1127,7 @@ module Telegram
 
     def with_td_timeout_retry(operation:, chat_id:, from_message_id:, wait_seconds: nil)
       retries = ENV.fetch("TELEGRAM_HISTORY_TIMEOUT_RETRIES", "3").to_i.clamp(0, 10)
-      retry_wait_seconds = normalize_wait_seconds(wait_seconds, default: default_history_timeout_retry_wait_seconds)
+      base_retry_wait_seconds = normalize_wait_seconds(wait_seconds, default: default_history_timeout_retry_wait_seconds)
       attempts = 0
 
       begin
@@ -1127,6 +1141,7 @@ module Telegram
           "Retry #{operation} for account #{@id} chat=#{chat_id} from_message_id=#{from_message_id} " \
           "attempt=#{attempts} error=#{e.message}"
         )
+        retry_wait_seconds = timeout_retry_wait_seconds(base_retry_wait_seconds, attempts)
         sleep(retry_wait_seconds) if retry_wait_seconds.positive?
         retry
       end
@@ -1143,6 +1158,14 @@ module Telegram
     def normalize_wait_seconds(wait_seconds, default:)
       seconds = wait_seconds.nil? ? default.to_f : wait_seconds.to_f
       seconds.negative? ? 0.0 : seconds
+    end
+
+    def timeout_retry_wait_seconds(base_retry_wait_seconds, attempt)
+      max_wait_seconds = ENV.fetch("TELEGRAM_HISTORY_TIMEOUT_RETRY_MAX_WAIT_SECONDS", "60").to_f
+      fallback_wait_seconds = default_history_timeout_retry_wait_seconds.positive? ? default_history_timeout_retry_wait_seconds : default_message_sync_wait_seconds
+      base_wait_seconds = base_retry_wait_seconds.to_f.positive? ? base_retry_wait_seconds.to_f : fallback_wait_seconds
+      wait_seconds = base_wait_seconds * (2**[ attempt - 1, 0 ].max)
+      [ wait_seconds, max_wait_seconds.positive? ? max_wait_seconds : wait_seconds ].min
     end
 
     def td_timeout_error?(error)

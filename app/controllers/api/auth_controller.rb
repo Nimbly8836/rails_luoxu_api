@@ -159,8 +159,8 @@ module Api
             next
           end
 
-          sync = session.sync_messages_for_chats(chat_ids: chat_ids)
-          Rails.logger.info("Auto synced history for account #{account_id} chats=#{chat_ids.inspect}: #{sync.inspect}")
+          sync = session.sync_messages_for_chats_async(chat_ids: chat_ids, reason: "auth_watch_targets")
+          Rails.logger.info("Auto enqueued history sync for account #{account_id} chats=#{chat_ids.inspect}: #{sync.inspect}")
         rescue StandardError => e
           Rails.logger.warn("Failed auto syncing history for account #{account_id} chats=#{chat_ids.inspect}: #{e.message}")
         end

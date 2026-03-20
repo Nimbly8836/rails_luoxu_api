@@ -79,12 +79,13 @@ module Api
         full_sync = ActiveModel::Type::Boolean.new.cast(params[:full_sync])
         session = ensure_session!
         session.invalidate_watched_chat_ids_cache! if session.respond_to?(:invalidate_watched_chat_ids_cache!)
-        sync = session.sync_messages_for_chats(
+        sync = session.sync_messages_for_chats_async(
           chat_ids:,
           limit_per_chat: full_sync ? nil : params[:message_limit],
-          wait_seconds: params[:wait_seconds]
+          wait_seconds: params[:wait_seconds],
+          reason: "watch_targets"
         )
-        render json: watch_targets_payload(@account, watched_chat_ids: chat_ids).merge(message_sync: sync)
+        render json: watch_targets_payload(@account, watched_chat_ids: chat_ids).merge(message_sync: sync), status: :accepted
       end
 
       def sync_chats
@@ -97,12 +98,13 @@ module Api
         profile = TelegramAccountProfile.find_by(telegram_account_id: @account.id)
         fallback_ids = profile&.watched_chat_ids
         chat_ids = Array(params[:chat_ids] || fallback_ids).map(&:to_i).uniq
-        sync = ensure_session!.sync_messages_for_chats(
+        sync = ensure_session!.sync_messages_for_chats_async(
           chat_ids:,
           limit_per_chat: params[:message_limit],
-          wait_seconds: params[:wait_seconds]
+          wait_seconds: params[:wait_seconds],
+          reason: "api_sync_messages"
         )
-        render json: { session_id: @account.uuid, chat_ids:, message_sync: sync }
+        render json: { session_id: @account.uuid, chat_ids:, message_sync: sync }, status: :accepted
       end
 
       def sync_group_members
