@@ -225,7 +225,7 @@ module Telegram
 
         per_chat_limit = limit_per_chat.present? ? limit_per_chat.to_i : nil
         per_chat_limit = nil if per_chat_limit&.<= 0
-        batch_limit = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BATCH_LIMIT", "100").to_i.clamp(1, 500)
+        batch_limit = configured_history_batch_limit
         delay = normalize_wait_seconds(wait_seconds, default: default_message_sync_wait_seconds)
         result = { chats: ids.size, upserted: 0, failed: 0, errors: [], details: [] }
 
@@ -255,111 +255,133 @@ module Telegram
           precheck_error = e.message
         end
 
+        history_seed_required = existing_max_message_id <= 0 && existing_max_td_message_id <= 0
+        history_backfill_only = !history_seed_required &&
+          history_backfill_required?(existing_min_message_id:, existing_min_td_message_id:)
         from_message_id = 0
         chat_upserted = 0
         chat_fetched = 0
         chat_parsed = 0
         batches = 0
-        mode = "history"
+        mode = if history_backfill_only
+                 "backfill"
+        elsif history_seed_required
+                 "full_history"
+        else
+                 "incremental"
+        end
         seen_message_ids = {}
         stalled_pages = 0
+        backfill = {
+          attempted: false,
+          reached_start: false,
+          upserted: 0,
+          fetched: 0,
+          parsed: 0,
+          batches: 0,
+          new_min_message_id: existing_min_message_id,
+          new_min_td_message_id: existing_min_td_message_id
+        }
 
-        loop do
-          response = fetch_history_messages_page(
-            chat_id:,
-            from_message_id:,
-            offset: 0,
-            limit: batch_limit,
-            retry_wait_seconds: delay
-          )
-          batches += 1
-          fetched_count = extract_history_count(response)
-          first_response_info ||= describe_response(response)
-
-          if batches == 1 && fetched_count.zero?
-            response = fetch_search_messages_page(
+        unless history_backfill_only
+          loop do
+            response = fetch_history_messages_page(
               chat_id:,
-              from_message_id: 0,
+              from_message_id:,
               offset: 0,
               limit: batch_limit,
               retry_wait_seconds: delay
             )
+            batches += 1
             fetched_count = extract_history_count(response)
-            mode = "search" if fetched_count.positive?
+            first_response_info ||= describe_response(response)
+
+            if batches == 1 && fetched_count.zero?
+              response = fetch_search_messages_page(
+                chat_id:,
+                from_message_id: 0,
+                offset: 0,
+                limit: batch_limit,
+                retry_wait_seconds: delay
+              )
+              fetched_count = extract_history_count(response)
+              mode = "search" if fetched_count.positive?
+            end
+
+            chat_fetched += fetched_count
+
+            message_bundles = extract_history_messages(response)
+            message_bundles = message_bundles.sort_by { |bundle| -bundle[:message][:message_id].to_i }
+            chat_parsed += message_bundles.size
+            break if message_bundles.empty?
+
+            message_bundles = message_bundles.reject do |bundle|
+              dedupe_key = history_bundle_dedupe_key(bundle)
+              duplicate = seen_message_ids.key?(dedupe_key)
+              seen_message_ids[dedupe_key] = true
+              duplicate
+            end
+
+            reached_existing_boundary = if existing_max_td_message_id.positive?
+                                          message_bundles.any? { |bundle| bundle[:td_message_id].to_i <= existing_max_td_message_id }
+            else
+                                          existing_max_message_id.positive? &&
+                                            message_bundles.any? { |bundle| bundle[:message][:message_id].to_i <= existing_max_message_id }
+            end
+            message_bundles = if existing_max_td_message_id.positive?
+                                message_bundles.select { |bundle| bundle[:td_message_id].to_i > existing_max_td_message_id }
+            else
+                                message_bundles.select do |bundle|
+                                  existing_max_message_id <= 0 || bundle[:message][:message_id].to_i > existing_max_message_id
+                                end
+            end
+            break if message_bundles.empty?
+
+            if per_chat_limit
+              remaining = per_chat_limit - chat_upserted
+              break if remaining <= 0
+
+              message_bundles = message_bundles.first(remaining)
+            end
+
+            upsert_usernames_from(message_bundles)
+            upserted = upsert_messages_bulk(message_bundles.map { |bundle| bundle[:message] })
+            result[:upserted] += upserted
+            chat_upserted += upserted
+
+            oldest_td_message_id = message_bundles.map { |bundle| bundle[:td_message_id].to_i }.min.to_i
+            break if oldest_td_message_id <= 0
+            break if reached_existing_boundary
+
+            if oldest_td_message_id == from_message_id
+              stalled_pages += 1
+              break if stalled_pages >= 2
+            else
+              stalled_pages = 0
+            end
+
+            from_message_id = oldest_td_message_id
+            sleep(delay) if delay.positive?
           end
-
-          chat_fetched += fetched_count
-
-          message_bundles = extract_history_messages(response)
-          message_bundles = message_bundles.sort_by { |bundle| -bundle[:message][:message_id].to_i }
-          chat_parsed += message_bundles.size
-          break if message_bundles.empty?
-
-          message_bundles = message_bundles.reject do |bundle|
-            dedupe_key = history_bundle_dedupe_key(bundle)
-            duplicate = seen_message_ids.key?(dedupe_key)
-            seen_message_ids[dedupe_key] = true
-            duplicate
-          end
-
-          reached_existing_boundary = if existing_max_td_message_id.positive?
-                                        message_bundles.any? { |bundle| bundle[:td_message_id].to_i <= existing_max_td_message_id }
-          else
-                                        existing_max_message_id.positive? &&
-                                          message_bundles.any? { |bundle| bundle[:message][:message_id].to_i <= existing_max_message_id }
-          end
-          message_bundles = if existing_max_td_message_id.positive?
-                              message_bundles.select { |bundle| bundle[:td_message_id].to_i > existing_max_td_message_id }
-          else
-                              message_bundles.select do |bundle|
-                                existing_max_message_id <= 0 || bundle[:message][:message_id].to_i > existing_max_message_id
-                              end
-          end
-          break if message_bundles.empty?
-
-          if per_chat_limit
-            remaining = per_chat_limit - chat_upserted
-            break if remaining <= 0
-
-            message_bundles = message_bundles.first(remaining)
-          end
-
-          upsert_usernames_from(message_bundles)
-          upserted = upsert_messages_bulk(message_bundles.map { |bundle| bundle[:message] })
-          result[:upserted] += upserted
-          chat_upserted += upserted
-
-          oldest_td_message_id = message_bundles.map { |bundle| bundle[:td_message_id].to_i }.min.to_i
-          break if oldest_td_message_id <= 0
-          break if reached_existing_boundary
-
-          if oldest_td_message_id == from_message_id
-            stalled_pages += 1
-            break if stalled_pages >= 2
-          else
-            stalled_pages = 0
-          end
-
-          from_message_id = oldest_td_message_id
-          sleep(delay) if delay.positive?
         end
 
-        # Backfill older history when local data starts above 1.
-        # This helps recover early messages after prior partial syncs.
-        backfill = backfill_older_messages_for_chat(
-          chat_id:,
-          existing_min_message_id:,
-          existing_min_td_message_id:,
-          per_chat_limit:,
-          batch_limit:,
-          delay:
-        )
-        result[:upserted] += backfill[:upserted]
-        chat_upserted += backfill[:upserted]
-        chat_fetched += backfill[:fetched]
-        chat_parsed += backfill[:parsed]
-        batches += backfill[:batches]
-        existing_min_message_id = backfill[:new_min_message_id] if backfill[:new_min_message_id].positive?
+        if history_backfill_only
+          backfill = backfill_older_messages_for_chat(
+            chat_id:,
+            existing_min_message_id:,
+            existing_min_td_message_id:,
+            per_chat_limit:,
+            batch_limit:,
+            delay:
+          )
+          result[:upserted] += backfill[:upserted]
+          chat_upserted += backfill[:upserted]
+          chat_fetched += backfill[:fetched]
+          chat_parsed += backfill[:parsed]
+          batches += backfill[:batches]
+          existing_min_message_id = backfill[:new_min_message_id] if backfill[:new_min_message_id].positive?
+          existing_min_td_message_id = backfill[:new_min_td_message_id] if backfill[:new_min_td_message_id].positive?
+        end
 
         result[:details] << {
           chat_id:,
@@ -414,7 +436,8 @@ module Telegram
         fetched: 0,
         parsed: 0,
         batches: 0,
-        new_min_message_id: existing_min_message_id.to_i
+        new_min_message_id: existing_min_message_id.to_i,
+        new_min_td_message_id: existing_min_td_message_id.to_i
       }
       return result if per_chat_limit.present?
 
@@ -436,7 +459,8 @@ module Telegram
           chat_id:,
           from_message_id:,
           offset: 0,
-          limit: batch_limit
+          limit: batch_limit,
+          retry_wait_seconds: delay
         )
         pages += 1
         result[:batches] += 1
@@ -492,7 +516,17 @@ module Telegram
       end
 
       result[:new_min_message_id] = min_message_id
+      result[:new_min_td_message_id] = min_td_message_id
       result
+    end
+
+    def history_backfill_required?(existing_min_message_id:, existing_min_td_message_id:)
+      min_message_id = existing_min_message_id.to_i
+      min_td_message_id = existing_min_td_message_id.to_i
+      return false if min_message_id <= 0 && min_td_message_id <= 0
+      return false if min_message_id <= 1
+
+      true
     end
 
     def dispose
@@ -1062,26 +1096,38 @@ module Telegram
     end
 
     def fetch_history_messages_page(chat_id:, from_message_id:, offset:, limit:, retry_wait_seconds: nil)
-      with_td_timeout_retry(operation: "get_chat_history", chat_id:, from_message_id:, wait_seconds: retry_wait_seconds) do
+      fetch_td_history_page_with_adaptive_limit(
+        operation: "get_chat_history",
+        chat_id:,
+        from_message_id:,
+        limit:,
+        retry_wait_seconds:
+      ) do |effective_limit|
         @client.get_chat_history(
           chat_id:,
           from_message_id:,
           offset:,
-          limit:,
+          limit: effective_limit,
           only_local: false
         ).value!
       end
     end
 
     def fetch_search_messages_page(chat_id:, from_message_id:, offset:, limit:, retry_wait_seconds: nil)
-      with_td_timeout_retry(operation: "search_chat_messages", chat_id:, from_message_id:, wait_seconds: retry_wait_seconds) do
+      fetch_td_history_page_with_adaptive_limit(
+        operation: "search_chat_messages",
+        chat_id:,
+        from_message_id:,
+        limit:,
+        retry_wait_seconds:
+      ) do |effective_limit|
         @client.search_chat_messages(
           chat_id:,
           query: "",
           sender_id: nil,
           from_message_id:,
           offset:,
-          limit:,
+          limit: effective_limit,
           filter: nil,
           message_thread_id: 0,
           saved_messages_topic_id: 0
@@ -1212,7 +1258,35 @@ module Telegram
       end
     end
 
-    def with_td_timeout_retry(operation:, chat_id:, from_message_id:, wait_seconds: nil)
+    def fetch_td_history_page_with_adaptive_limit(operation:, chat_id:, from_message_id:, limit:, retry_wait_seconds: nil)
+      current_limit = normalize_history_batch_limit(limit)
+      minimum_limit = minimum_history_batch_limit
+
+      loop do
+        return with_td_timeout_retry(
+          operation:,
+          chat_id:,
+          from_message_id:,
+          wait_seconds: retry_wait_seconds,
+          limit: current_limit
+        ) do
+          yield(current_limit)
+        end
+      rescue StandardError => e
+        raise unless td_timeout_error?(e)
+
+        next_limit = reduced_history_batch_limit(current_limit, minimum_limit)
+        raise if next_limit >= current_limit
+
+        Rails.logger.warn(
+          "Reducing #{operation} batch size for account #{@id} chat=#{chat_id} from_message_id=#{from_message_id} " \
+          "limit=#{current_limit} next_limit=#{next_limit} after timeout"
+        )
+        current_limit = next_limit
+      end
+    end
+
+    def with_td_timeout_retry(operation:, chat_id:, from_message_id:, wait_seconds: nil, limit: nil)
       retries = ENV.fetch("TELEGRAM_HISTORY_TIMEOUT_RETRIES", "3").to_i.clamp(0, 10)
       base_retry_wait_seconds = normalize_wait_seconds(wait_seconds, default: default_history_timeout_retry_wait_seconds)
       attempts = 0
@@ -1226,7 +1300,7 @@ module Telegram
 
         Rails.logger.warn(
           "Retry #{operation} for account #{@id} chat=#{chat_id} from_message_id=#{from_message_id} " \
-          "attempt=#{attempts} error=#{e.message}"
+          "limit=#{limit || 'n/a'} attempt=#{attempts} error=#{e.message}"
         )
         retry_wait_seconds = timeout_retry_wait_seconds(base_retry_wait_seconds, attempts)
         sleep(retry_wait_seconds) if retry_wait_seconds.positive?
@@ -1236,6 +1310,26 @@ module Telegram
 
     def default_message_sync_wait_seconds
       ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "5").to_f
+    end
+
+    def configured_history_batch_limit
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_BATCH_LIMIT", "50").to_i.clamp(1, 500)
+    end
+
+    def minimum_history_batch_limit
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_MIN_BATCH_LIMIT", "10").to_i.clamp(1, configured_history_batch_limit)
+    end
+
+    def normalize_history_batch_limit(limit)
+      requested_limit = limit.to_i
+      effective_limit = requested_limit.positive? ? requested_limit : configured_history_batch_limit
+      effective_limit.clamp(minimum_history_batch_limit, configured_history_batch_limit)
+    end
+
+    def reduced_history_batch_limit(current_limit, minimum_limit = minimum_history_batch_limit)
+      return minimum_limit if current_limit <= minimum_limit
+
+      [ current_limit / 2, minimum_limit ].max
     end
 
     def default_history_timeout_retry_wait_seconds

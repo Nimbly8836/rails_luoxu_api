@@ -54,8 +54,8 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     response.define_singleton_method(:value!) { :history_page }
     client.define_singleton_method(:get_chat_history) { |**| response }
     session.instance_variable_set(:@client, client)
-    session.define_singleton_method(:with_td_timeout_retry) do |operation:, chat_id:, from_message_id:, wait_seconds:, &block|
-      captured_wait_seconds << [ operation, chat_id, from_message_id, wait_seconds ]
+    session.define_singleton_method(:with_td_timeout_retry) do |operation:, chat_id:, from_message_id:, wait_seconds:, limit: nil, &block|
+      captured_wait_seconds << [ operation, chat_id, from_message_id, wait_seconds, limit ]
       block.call
     end
 
@@ -69,7 +69,40 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     )
 
     assert_equal :history_page, result
-    assert_equal [ [ "get_chat_history", 123, 456, 7.5 ] ], captured_wait_seconds
+    assert_equal [ [ "get_chat_history", 123, 456, 7.5, 20 ] ], captured_wait_seconds
+  end
+
+  test "history fetch reduces batch size after timeout" do
+    session = build_session
+    response = Object.new
+    client = Object.new
+    requested_limits = []
+
+    response.define_singleton_method(:value!) { :history_page }
+    client.define_singleton_method(:get_chat_history) do |**kwargs|
+      requested_limits << kwargs[:limit]
+      raise Timeout::Error, "Timeout error" if requested_limits.one?
+
+      response
+    end
+    session.instance_variable_set(:@client, client)
+    session.define_singleton_method(:with_td_timeout_retry) do |operation:, chat_id:, from_message_id:, wait_seconds:, limit: nil, &block|
+      block.call
+    end
+
+    with_env("TELEGRAM_MESSAGE_SYNC_MIN_BATCH_LIMIT" => "10") do
+      result = session.send(
+        :fetch_history_messages_page,
+        chat_id: 123,
+        from_message_id: 0,
+        offset: 0,
+        limit: 50,
+        retry_wait_seconds: 7.5
+      )
+
+      assert_equal :history_page, result
+      assert_equal [ 50, 25 ], requested_limits
+    end
   end
 
   test "timeout retry wait grows with each retry" do
@@ -98,6 +131,14 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
       assert_equal 3, attempts
       assert_equal [ 5.0, 10.0 ], sleeps
     end
+  end
+
+  test "history backfill is required only when local history has a gap" do
+    session = build_session
+
+    assert_equal true, session.send(:history_backfill_required?, existing_min_message_id: 42, existing_min_td_message_id: 123)
+    assert_equal false, session.send(:history_backfill_required?, existing_min_message_id: 1, existing_min_td_message_id: 123)
+    assert_equal false, session.send(:history_backfill_required?, existing_min_message_id: 0, existing_min_td_message_id: 0)
   end
 
   test "sync_messages_for_chats_async enqueues a message sync job" do
