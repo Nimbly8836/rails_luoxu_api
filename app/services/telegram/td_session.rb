@@ -16,6 +16,7 @@ module Telegram
       @account_id = account.id
       @id = account.uuid
       @mutex = Mutex.new
+      @operation_mutex = Mutex.new
       @state = :initializing
       @me = nil
       @last_error = nil
@@ -58,6 +59,22 @@ module Telegram
         chat_ids:,
         limit_per_chat:,
         wait_seconds:,
+        reason:
+      )
+    end
+
+    def sync_group_members_for_chats_async(chat_ids:, refresh_avatars: true, reason: "manual")
+      enqueue_group_member_sync_job(
+        chat_ids:,
+        refresh_avatars:,
+        reason:
+      )
+    end
+
+    def refresh_chat_async(chat_id:, refresh_avatar: true, reason: "manual")
+      enqueue_chat_refresh_job(
+        chat_id:,
+        refresh_avatar:,
         reason:
       )
     end
@@ -118,51 +135,58 @@ module Telegram
       end
     end
 
+    def operation_in_progress?
+      @operation_mutex.locked?
+    end
+
     def sync_chats_now(limit: nil, force_full: false)
       raise_if_disposed!
-
-      max_limit = (limit || ENV.fetch("TELEGRAM_CHAT_SYNC_LIMIT", "500")).to_i
-      max_limit = 1 if max_limit < 1
-      sync_chats(limit: max_limit, force_full: force_full)
+      with_operation_lock do
+        max_limit = (limit || ENV.fetch("TELEGRAM_CHAT_SYNC_LIMIT", "500")).to_i
+        max_limit = 1 if max_limit < 1
+        sync_chats(limit: max_limit, force_full: force_full)
+      end
     end
 
     def resolve_message_link(chat_id:, td_message_id:)
       raise_if_disposed!
-
       chat_key = chat_id.to_i
       message_key = td_message_id.to_i
-      return nil if chat_key == 0 || message_key <= 0
 
-      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      cache_key = [ chat_key, message_key ]
-      cached = @mutex.synchronize do
-        entry = @message_link_cache[cache_key]
-        next nil if entry.nil?
+      with_operation_lock do
+        return nil if chat_key == 0 || message_key <= 0
 
-        if (now - entry[:loaded_at]) < MESSAGE_LINK_CACHE_TTL_SECONDS
-          entry[:url]
-        else
-          @message_link_cache.delete(cache_key)
-          nil
+        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        cache_key = [ chat_key, message_key ]
+        cached = @mutex.synchronize do
+          entry = @message_link_cache[cache_key]
+          next nil if entry.nil?
+
+          if (now - entry[:loaded_at]) < MESSAGE_LINK_CACHE_TTL_SECONDS
+            entry[:url]
+          else
+            @message_link_cache.delete(cache_key)
+            nil
+          end
         end
-      end
-      return cached if cached.present?
+        return cached if cached.present?
 
-      wait_until_ready!(timeout: 10)
-      response = @client.get_message_link(
-        chat_id: chat_key,
-        message_id: message_key,
-        media_timestamp: 0,
-        for_album: false,
-        in_message_thread: false
-      ).value!
-      url = extract_message_link_url(response)
-      return nil if url.blank?
+        wait_until_ready!(timeout: 10)
+        response = @client.get_message_link(
+          chat_id: chat_key,
+          message_id: message_key,
+          media_timestamp: 0,
+          for_album: false,
+          in_message_thread: false
+        ).value!
+        url = extract_message_link_url(response)
+        return nil if url.blank?
 
-      @mutex.synchronize do
-        @message_link_cache[cache_key] = { url:, loaded_at: now }
+        @mutex.synchronize do
+          @message_link_cache[cache_key] = { url:, loaded_at: now }
+        end
+        url
       end
-      url
     rescue StandardError => e
       Rails.logger.warn(
         "Failed resolving message link for account #{@id} chat=#{chat_key} td_message_id=#{message_key}: #{e.message}"
@@ -192,19 +216,20 @@ module Telegram
     end
 
     def sync_messages_for_chats(chat_ids:, limit_per_chat: nil, wait_seconds: nil)
-      raise_if_disposed!
-      wait_until_ready!
+      with_operation_lock do
+        raise_if_disposed!
+        wait_until_ready!
 
-      ids = Array(chat_ids).map(&:to_i).uniq
-      return { chats: 0, upserted: 0, failed: 0, errors: [] } if ids.empty?
+        ids = Array(chat_ids).map(&:to_i).uniq
+        return { chats: 0, upserted: 0, failed: 0, errors: [] } if ids.empty?
 
-      per_chat_limit = limit_per_chat.present? ? limit_per_chat.to_i : nil
-      per_chat_limit = nil if per_chat_limit&.<= 0
-      batch_limit = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BATCH_LIMIT", "100").to_i.clamp(1, 500)
-      delay = normalize_wait_seconds(wait_seconds, default: default_message_sync_wait_seconds)
-      result = { chats: ids.size, upserted: 0, failed: 0, errors: [], details: [] }
+        per_chat_limit = limit_per_chat.present? ? limit_per_chat.to_i : nil
+        per_chat_limit = nil if per_chat_limit&.<= 0
+        batch_limit = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BATCH_LIMIT", "100").to_i.clamp(1, 500)
+        delay = normalize_wait_seconds(wait_seconds, default: default_message_sync_wait_seconds)
+        result = { chats: ids.size, upserted: 0, failed: 0, errors: [], details: [] }
 
-      ids.each do |chat_id|
+        ids.each do |chat_id|
         chat_known_to_account = TelegramChat.exists?(telegram_account_id: @account_id, td_chat_id: chat_id)
         message_scope = TelegramMessage.where(
           telegram_account_id: @account_id,
@@ -375,9 +400,10 @@ module Telegram
           first_response: first_response_info,
           error: e.message
         }
-      end
+        end
 
-      result
+        result
+      end
     end
 
     def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, existing_min_td_message_id:, per_chat_limit:, batch_limit:, delay:)
@@ -484,34 +510,38 @@ module Telegram
     end
 
     def refresh_chat(chat_id:, refresh_avatar: true)
-      raise_if_disposed!
-      wait_until_ready!
+      with_operation_lock do
+        raise_if_disposed!
+        wait_until_ready!
 
-      existing_chat = TelegramChat.find_by(telegram_account_id: @account_id, td_chat_id: chat_id.to_i)
-      chat = @client.get_chat(chat_id: chat_id).value!
-      upsert_chat_record(chat, include_avatar_blob: refresh_avatar, existing_record: existing_chat)
+        existing_chat = TelegramChat.find_by(telegram_account_id: @account_id, td_chat_id: chat_id.to_i)
+        chat = @client.get_chat(chat_id: chat_id).value!
+        upsert_chat_record(chat, include_avatar_blob: refresh_avatar, existing_record: existing_chat)
+      end
     end
 
     def sync_group_members_for_chats(chat_ids:, refresh_avatars: true)
-      raise_if_disposed!
-      wait_until_ready!
+      with_operation_lock do
+        raise_if_disposed!
+        wait_until_ready!
 
-      ids = Array(chat_ids).map(&:to_i).uniq
-      return { chats: 0, upserted: 0, failed: 0, errors: [], details: [] } if ids.empty?
+        ids = Array(chat_ids).map(&:to_i).uniq
+        return { chats: 0, upserted: 0, failed: 0, errors: [], details: [] } if ids.empty?
 
-      result = { chats: ids.size, upserted: 0, failed: 0, errors: [], details: [] }
+        result = { chats: ids.size, upserted: 0, failed: 0, errors: [], details: [] }
 
-      ids.each do |chat_id|
-        detail = sync_group_members_for_chat(chat_id, refresh_avatars:)
-        result[:upserted] += detail[:upserted]
-        result[:details] << detail
-      rescue StandardError => e
-        result[:failed] += 1
-        result[:errors] << "chat #{chat_id}: #{e.message}"
-        result[:details] << { chat_id:, error: e.message, upserted: 0 }
+        ids.each do |chat_id|
+          detail = sync_group_members_for_chat(chat_id, refresh_avatars:)
+          result[:upserted] += detail[:upserted]
+          result[:details] << detail
+        rescue StandardError => e
+          result[:failed] += 1
+          result[:errors] << "chat #{chat_id}: #{e.message}"
+          result[:details] << { chat_id:, error: e.message, upserted: 0 }
+        end
+
+        result
       end
-
-      result
     end
 
     private
@@ -544,9 +574,61 @@ module Telegram
       }
     end
 
+    def enqueue_group_member_sync_job(chat_ids:, refresh_avatars:, reason:)
+      ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq.sort
+      return { enqueued: false, status: "skipped", reason: "no_chat_ids" } if ids.empty?
+
+      job = Telegram::GroupMemberSyncJob.perform_later(
+        account_uuid: @id,
+        chat_ids: ids,
+        refresh_avatars: ActiveModel::Type::Boolean.new.cast(refresh_avatars),
+        reason: reason.to_s,
+        retry_attempt: 0
+      )
+
+      {
+        enqueued: true,
+        status: "enqueued",
+        reason: reason.to_s,
+        job_id: job.job_id,
+        chat_ids: ids,
+        refresh_avatars: ActiveModel::Type::Boolean.new.cast(refresh_avatars)
+      }
+    end
+
+    def enqueue_chat_refresh_job(chat_id:, refresh_avatar:, reason:)
+      normalized_chat_id = chat_id.to_i
+      return { enqueued: false, status: "skipped", reason: "no_chat_id" } if normalized_chat_id.zero?
+
+      job = Telegram::ChatRefreshJob.perform_later(
+        account_uuid: @id,
+        chat_id: normalized_chat_id,
+        refresh_avatar: ActiveModel::Type::Boolean.new.cast(refresh_avatar),
+        reason: reason.to_s
+      )
+
+      {
+        enqueued: true,
+        status: "enqueued",
+        reason: reason.to_s,
+        job_id: job.job_id,
+        chat_id: normalized_chat_id,
+        refresh_avatar: ActiveModel::Type::Boolean.new.cast(refresh_avatar)
+      }
+    end
+
     def normalize_limit_per_chat(limit_per_chat)
       value = limit_per_chat.present? ? limit_per_chat.to_i : nil
       value&.positive? ? value : nil
+    end
+
+    def with_operation_lock(nonblock: false)
+      locked = nonblock ? @operation_mutex.try_lock : @operation_mutex.lock
+      return false if nonblock && !locked
+
+      yield
+    ensure
+      @operation_mutex.unlock if locked
     end
 
     def subscribe_updates
@@ -661,12 +743,17 @@ module Telegram
       config = {
         use_test_dc: account.use_test_dc,
         database_directory: account.database_directory,
-        files_directory: account.files_directory
+        files_directory: account.files_directory,
+        timeout: td_client_timeout_seconds
       }
 
       encryption_key = ENV["TDLIB_DATABASE_ENCRYPTION_KEY"].presence
       config[:database_encryption_key] = encryption_key if encryption_key
       config
+    end
+
+    def td_client_timeout_seconds
+      ENV.fetch("TDLIB_CLIENT_TIMEOUT_SECONDS", "60").to_f.clamp(1.0, 600.0)
     end
 
     def persist_me

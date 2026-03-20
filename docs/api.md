@@ -259,7 +259,8 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 
 - 无权限时返回 `403`，响应体为空。
 - 有权限但数据库里找不到该群时返回 `404`，响应体为空。
-- 查询前会尝试触发一次群资料刷新。
+- 读取优先使用本地缓存，不会同步阻塞到 Telegram。
+- 传 `refresh=true` 时会异步入队群资料刷新，当前请求仍立即返回缓存结果。
 
 ### GET `/api/me/chats/:chat_id/members`
 
@@ -274,6 +275,7 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 | `page` | integer | 否 | 页码，默认 `1` |
 | `per_page` | integer | 否 | 每页数量，范围 `1..200`，默认 `20` |
 | `limit` | integer | 否 | `per_page` 别名 |
+| `refresh` | boolean | 否 | 为 `true` 时异步入队群成员刷新，当前请求仍返回缓存数据 |
 
 成功响应：
 
@@ -660,7 +662,7 @@ curl -X POST 'http://127.0.0.1/api/telegram/sessions?use_test_dc=false' \
 ### POST `/api/telegram/sessions/:id/sync_group_members`
 
 - 鉴权：是
-- 说明：手动同步群成员；不传 `chat_ids` 时，使用该会话当前 `watched_chat_ids`
+- 说明：手动触发后台群成员同步；不传 `chat_ids` 时，使用该会话当前 `watched_chat_ids`
 
 请求体：
 
@@ -675,16 +677,17 @@ curl -X POST 'http://127.0.0.1/api/telegram/sessions?use_test_dc=false' \
   "session_id": "2dbd1e1e-6e0f-4a3b-a963-04cb5b5f2f95",
   "chat_ids": [-1001234567890],
   "group_member_sync": {
-    "chats": 1,
-    "upserted": 88,
-    "failed": 0,
-    "errors": [],
-    "details": [
-      {
-        "chat_id": -1001234567890,
-        "upserted": 88
-      }
-    ]
+    "enqueued": true,
+    "status": "enqueued",
+    "reason": "api_sync_group_members",
+    "job_id": "0b4d7f0f-2e7e-4728-b17b-08ad8f6ef3d6",
+    "chat_ids": [-1001234567890],
+    "refresh_avatars": true
   }
 }
 ```
+
+说明：
+
+- 返回 `202 Accepted`，表示后台群成员同步已经开始或已入队。
+- 后台任务失败时会按递增间隔重新入队失败的群。

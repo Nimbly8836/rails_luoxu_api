@@ -23,8 +23,12 @@ module Api
       chat_id = permitted_chat_id
       return head :forbidden if chat_id.nil?
 
-      refresh_chat(chat_id)
       rows = TelegramChat.where(td_chat_id: chat_id).order(:telegram_account_id)
+      force_refresh = ActiveModel::Type::Boolean.new.cast(params[:refresh])
+      if force_refresh || rows.empty?
+        refresh_chat(chat_id, force: force_refresh)
+        rows = TelegramChat.where(td_chat_id: chat_id).order(:telegram_account_id)
+      end
       return head :not_found if rows.empty?
 
       render json: serialize_chat(rows.first, rows.size)
@@ -40,7 +44,9 @@ module Api
       per_page = (params[:per_page] || params[:limit] || 20).to_i.clamp(1, 200)
       offset = (page - 1) * per_page
 
-      refresh_chat_members(chat_id)
+      force_refresh = ActiveModel::Type::Boolean.new.cast(params[:refresh])
+      cached_members_exist = TelegramChatUsername.where(group_id: chat_id).where("uid > 0").exists?
+      refresh_chat_members(chat_id, force: force_refresh) if force_refresh || !cached_members_exist
       scope = TelegramChatUsername.where(group_id: chat_id).where("uid > 0")
       if query.present?
         uid = Integer(query, exception: false)
@@ -260,80 +266,74 @@ module Api
       end
     end
 
-    def refresh_chat_members(chat_id)
-      sessions = chat_sessions(chat_id)
-      return if sessions.empty?
+    def refresh_chat_members(chat_id, force: false)
+      accounts = chat_accounts(chat_id)
+      return if accounts.empty?
 
-      attempts = []
-      sessions.each do |session|
-        next unless session_ready_for_refresh?(session, chat_id)
+      enqueued = accounts.filter_map do |account|
+        session = ::Telegram::Runtime.fetch(account.uuid)
+        next if !force && session&.operation_in_progress?
 
-        begin
-          session.refresh_chat(chat_id:, refresh_avatar: true)
-          sync = session.sync_group_members_for_chats(chat_ids: [ chat_id ], refresh_avatars: true)
-          attempts << { session_id: session.id, sync: }
-          return if sync[:failed].to_i.zero?
-        rescue StandardError => e
-          attempts << { session_id: session.id, error: e.message }
-        end
+        sync = Telegram::GroupMemberSyncJob.perform_later(
+          account_uuid: account.uuid,
+          chat_ids: [ chat_id.to_i ],
+          refresh_avatars: true,
+          reason: "api_me_chat_members",
+          retry_attempt: 0
+        )
+        { account_uuid: account.uuid, job_id: sync.job_id }
+      rescue StandardError => e
+        Rails.logger.warn("Failed enqueueing member refresh for chat #{chat_id} account #{account.uuid}: #{e.message}")
+        nil
       end
 
-      Rails.logger.warn("Member sync attempts exhausted for chat #{chat_id}: #{attempts.inspect}")
+      Rails.logger.info("Enqueued member refresh for chat #{chat_id}: #{enqueued.inspect}") if enqueued.any?
     rescue StandardError => e
       Rails.logger.warn("Failed refreshing members for chat #{chat_id}: #{e.message}")
     end
 
-    def refresh_chat(chat_id)
-      sessions = chat_sessions(chat_id)
-      return if sessions.empty?
+    def refresh_chat(chat_id, force: false)
+      accounts = chat_accounts(chat_id)
+      return if accounts.empty?
 
-      sessions.each do |session|
-        next unless session_ready_for_refresh?(session, chat_id)
+      accounts.each do |account|
+        session = ::Telegram::Runtime.fetch(account.uuid)
+        if !force && session&.operation_in_progress?
+          Rails.logger.info("Skip refresh for chat #{chat_id}: session #{session.id} is busy")
+          next
+        end
 
-        session.refresh_chat(chat_id:, refresh_avatar: true)
+        refresh = Telegram::ChatRefreshJob.perform_later(
+          account_uuid: account.uuid,
+          chat_id: chat_id.to_i,
+          refresh_avatar: true,
+          reason: "api_me_chat"
+        )
+        Rails.logger.info(
+          "Enqueued chat refresh for chat #{chat_id} account #{account.uuid}: job_id=#{refresh.job_id}"
+        )
         return
       rescue StandardError => e
-        Rails.logger.warn("Failed refreshing chat #{chat_id} with session #{session.id}: #{e.message}")
+        Rails.logger.warn("Failed enqueueing chat refresh for chat #{chat_id} account #{account.uuid}: #{e.message}")
       end
     rescue StandardError => e
       Rails.logger.warn("Failed refreshing chat #{chat_id}: #{e.message}")
     end
 
-    def session_ready_for_refresh?(session, chat_id)
-      state = session.wait_for_initial_state(timeout: 3)
-      if state == :initializing
-        session.wait_until_ready!(timeout: 20)
-        state = session.snapshot[:state]
-      end
-      return true if state == :ready
-
-      Rails.logger.info("Skip refresh for chat #{chat_id}: session state is #{state}")
-      false
-    rescue StandardError => e
-      Rails.logger.warn("Failed checking session state for chat #{chat_id}: #{e.message}")
-      false
-    end
-
-    def chat_session(chat_id)
-      chat_sessions(chat_id).first
-    end
-
-    def chat_sessions(chat_id)
-      account_ids = recent_message_account_ids(chat_id) + recent_chat_account_ids(chat_id)
+    def chat_accounts(chat_id)
+      account_ids = recent_message_account_ids(chat_id) + recent_chat_account_ids(chat_id) + watched_chat_account_ids(chat_id)
       account_ids = account_ids.map(&:to_i).uniq
       return [] if account_ids.empty?
 
       accounts_by_id = TelegramAccount.where(id: account_ids, enabled: true).index_by(&:id)
 
-      account_ids.filter_map do |account_id|
-        account = accounts_by_id[account_id]
-        next if account.nil?
+      account_ids.filter_map { |account_id| accounts_by_id[account_id] }
+    end
 
-        ::Telegram::Runtime.fetch(account.uuid) || ::Telegram::Runtime.start(account)
-      rescue StandardError => e
-        Rails.logger.warn("Failed starting session for account #{account_id}: #{e.message}")
-        nil
-      end
+    def watched_chat_account_ids(chat_id)
+      TelegramAccountWatchTarget.joins(:telegram_account)
+                               .where(td_chat_id: chat_id, telegram_accounts: { enabled: true })
+                               .pluck(:telegram_account_id)
     end
 
     def recent_message_account_ids(chat_id)

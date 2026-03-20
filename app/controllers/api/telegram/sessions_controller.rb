@@ -106,8 +106,12 @@ module Api
         profile = TelegramAccountProfile.find_by(telegram_account_id: @account.id)
         fallback_ids = profile&.watched_chat_ids
         chat_ids = Array(params[:chat_ids] || fallback_ids).map(&:to_i).uniq
-        sync = ensure_session!.sync_group_members_for_chats(chat_ids:)
-        render json: { session_id: @account.uuid, chat_ids:, group_member_sync: sync }
+        sync = ensure_session!.sync_group_members_for_chats_async(
+          chat_ids:,
+          refresh_avatars: true,
+          reason: "api_sync_group_members"
+        )
+        render json: { session_id: @account.uuid, chat_ids:, group_member_sync: sync }, status: :accepted
       end
 
       private

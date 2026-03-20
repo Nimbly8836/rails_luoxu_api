@@ -144,6 +144,47 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal "boot", args["reason"]
   end
 
+  test "sync_group_members_for_chats_async enqueues a group member sync job" do
+    session = build_session
+
+    result = session.sync_group_members_for_chats_async(chat_ids: [3, 1, 3], reason: "manual")
+
+    assert_equal true, result[:enqueued]
+    assert_equal "enqueued", result[:status]
+    assert result[:job_id].present?
+    assert_equal [1, 3], result[:chat_ids]
+    assert_equal true, result[:refresh_avatars]
+
+    job = enqueued_jobs.last
+    assert_equal Telegram::GroupMemberSyncJob, job[:job]
+    args = job[:args].first
+    assert_equal "test-session", args["account_uuid"]
+    assert_equal [1, 3], args["chat_ids"]
+    assert_equal true, args["refresh_avatars"]
+    assert_equal "manual", args["reason"]
+    assert_equal 0, args["retry_attempt"]
+  end
+
+  test "refresh_chat_async enqueues a chat refresh job" do
+    session = build_session
+
+    result = session.refresh_chat_async(chat_id: -100123, reason: "api_me_chat")
+
+    assert_equal true, result[:enqueued]
+    assert_equal "enqueued", result[:status]
+    assert result[:job_id].present?
+    assert_equal(-100123, result[:chat_id])
+    assert_equal true, result[:refresh_avatar]
+
+    job = enqueued_jobs.last
+    assert_equal Telegram::ChatRefreshJob, job[:job]
+    args = job[:args].first
+    assert_equal "test-session", args["account_uuid"]
+    assert_equal(-100123, args["chat_id"])
+    assert_equal true, args["refresh_avatar"]
+    assert_equal "api_me_chat", args["reason"]
+  end
+
   test "extract_chat_photo_attrs tolerates missing existing record" do
     session = build_session
 
@@ -177,12 +218,26 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     )
   end
 
+  test "client_config includes configurable tdlib timeout" do
+    session = build_session
+    account = Struct.new(:use_test_dc, :database_directory, :files_directory).new(false, "/tmp/db", "/tmp/files")
+
+    with_env("TDLIB_CLIENT_TIMEOUT_SECONDS" => "90") do
+      config = session.send(:client_config, account)
+
+      assert_equal 90.0, config[:timeout]
+      assert_equal "/tmp/db", config[:database_directory]
+      assert_equal "/tmp/files", config[:files_directory]
+    end
+  end
+
   private
 
   def build_session
     Telegram::TdSession.allocate.tap do |session|
       session.instance_variable_set(:@id, "test-session")
       session.instance_variable_set(:@mutex, Mutex.new)
+      session.instance_variable_set(:@operation_mutex, Mutex.new)
     end
   end
 
