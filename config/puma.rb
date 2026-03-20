@@ -34,6 +34,8 @@ port ENV.fetch("PORT", 3000)
 plugin :tmp_restart
 
 # Run the Solid Queue supervisor inside Puma only when explicitly enabled.
+preload_app! if ENV["SOLID_QUEUE_IN_PUMA"].to_s == "true"
+solid_queue_mode :async if ENV["SOLID_QUEUE_IN_PUMA"].to_s == "true"
 plugin :solid_queue if ENV["SOLID_QUEUE_IN_PUMA"].to_s == "true"
 
 # Specify the PID file. Defaults to tmp/pids/server.pid in development.

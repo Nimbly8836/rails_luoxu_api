@@ -1798,7 +1798,9 @@ module Telegram
 
       if include_blob
         attrs.merge!(prefix_avatar_blob_attrs("avatar_small", small, existing_record:, existing_file_id: small_file_id))
-      elsif existing_record&.avatar_small_file_id == small_file_id && existing_record.avatar_small_data.present?
+      elsif existing_record.present? &&
+          existing_record.avatar_small_file_id == small_file_id &&
+          existing_record.avatar_small_data.present?
         attrs.merge!(
           avatar_small_data: existing_record.avatar_small_data,
           avatar_small_content_type: existing_record.avatar_small_content_type,
@@ -1930,7 +1932,9 @@ module Telegram
 
       if refresh_avatar
         attrs.merge!(prefix_avatar_blob_attrs("avatar_small", small, existing_record: existing_member, existing_file_id: small_file_id))
-      elsif existing_member&.avatar_small_file_id == small_file_id && existing_member.avatar_small_data.present?
+      elsif existing_member.present? &&
+          existing_member.avatar_small_file_id == small_file_id &&
+          existing_member.avatar_small_data.present?
         attrs.merge!(
           avatar_small_data: existing_member.avatar_small_data,
           avatar_small_content_type: existing_member.avatar_small_content_type,

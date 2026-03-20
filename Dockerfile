@@ -28,7 +28,8 @@ ENV RAILS_ENV="production" \
     BUNDLE_DEPLOYMENT="1" \
     BUNDLE_PATH="/usr/local/bundle" \
     BUNDLE_WITHOUT="development" \
-    SOLID_QUEUE_IN_PUMA="false"
+    SOLID_QUEUE_IN_PUMA="true" \
+    SOLID_QUEUE_SUPERVISOR_MODE="async"
 
 # Build TDLib from source and export libtdjson.so (cache-friendly stage).
 FROM base AS tdlib-build

@@ -96,7 +96,7 @@ mkdir -p ./.docker/postgres ./.docker/storage
 docker compose -f docker-compose.yml.example up -d
 ```
 
-容器启动时会自动执行 `bin/rails db:prepare`，并通过 `Procfile.prod` 同时拉起 Web 和 Solid Queue job 进程。
+容器启动时会自动执行 `bin/rails db:prepare`，并通过 `Procfile.prod` 拉起 Web；Solid Queue 会以内嵌 async 模式运行在 Puma 进程内，不再单独起 `jobs` 进程。
 
 ### Step 4) 初始化首个管理员（一次性）
 

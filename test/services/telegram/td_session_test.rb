@@ -144,6 +144,39 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal "boot", args["reason"]
   end
 
+  test "extract_chat_photo_attrs tolerates missing existing record" do
+    session = build_session
+
+    attrs = session.send(:extract_chat_photo_attrs, nil, include_blob: false, existing_record: nil)
+
+    assert_equal(
+      {
+        avatar_small_file_id: nil,
+        avatar_big_file_id: nil,
+        avatar_small_data: nil,
+        avatar_small_content_type: nil,
+        avatar_small_fetched_at: nil
+      },
+      attrs
+    )
+  end
+
+  test "extract_user_avatar_attrs tolerates missing existing member" do
+    session = build_session
+
+    attrs = session.send(:extract_user_avatar_attrs, Object.new, existing_member: nil, refresh_avatar: false)
+
+    assert_equal(
+      {
+        avatar_small_file_id: nil,
+        avatar_small_data: nil,
+        avatar_small_content_type: nil,
+        avatar_small_fetched_at: nil
+      },
+      attrs
+    )
+  end
+
   private
 
   def build_session

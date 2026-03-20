@@ -4,7 +4,7 @@ module Api
   module Telegram
     class SessionsController < ApplicationController
       before_action :authenticate_system_user!
-      before_action :find_account, only: %i[show phone code password destroy purge watch_targets sync_chats sync_messages sync_group_members]
+      before_action :find_account, only: %i[show phone code password destroy purge watch_targets update_watch_targets sync_chats sync_messages sync_group_members]
 
       rescue_from ::Telegram::TdSession::InvalidStateError, with: :render_invalid_state
       rescue_from ActionController::ParameterMissing, with: :render_bad_request
@@ -63,12 +63,7 @@ module Api
       end
 
       def watch_targets
-        if request.get?
-          render json: watch_targets_payload(@account)
-          return
-        end
-
-        update_watch_targets
+        render json: watch_targets_payload(@account)
       end
 
       def update_watch_targets

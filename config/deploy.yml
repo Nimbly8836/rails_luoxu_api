@@ -8,6 +8,7 @@ image: your-user/rails_luoxu_api
 servers:
   web:
     - 192.168.0.1
+  # No dedicated job role by default. Solid Queue runs inside Puma.
   # job:
   #   hosts:
   #     - 192.168.0.1
@@ -37,14 +38,14 @@ env:
     - RAILS_MASTER_KEY
     - SECRET_KEY_BASE
   clear:
-    # The image default command runs both web and job processes via Foreman/Procfile.prod.
+    # The image default command runs Puma only; Solid Queue runs inside Puma in async mode.
     PORT: 80
-
-    # Set number of processes dedicated to Solid Queue (default: 1)
-    # JOB_CONCURRENCY: 3
 
     # Set number of cores available to the application on each server (default: 1).
     # WEB_CONCURRENCY: 2
+
+    # Set number of Solid Queue worker threads inside Puma (default: 1)
+    # TELEGRAM_JOB_THREADS: 2
 
     # Match this to any external database server to configure Active Record correctly
     # Use rails_luoxu_api-db for a db accessory server on same machine via local kamal docker network.
