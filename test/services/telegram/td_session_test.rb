@@ -132,6 +132,42 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal [ true, false ], calls.map { |call| call[:only_local] }
   end
 
+  test "history extraction skips remote sender lookup when disabled" do
+    session = build_session
+    client = Object.new
+    lookups = []
+    response = Object.new
+
+    client.define_singleton_method(:get_user) do |**kwargs|
+      lookups << kwargs
+      raise "should not fetch user remotely"
+    end
+    session.instance_variable_set(:@client, client)
+    response.define_singleton_method(:messages) do
+      [
+        {
+          "id" => 300_000_000_123,
+          "chat_id" => -100123,
+          "date" => 1_700_000_000,
+          "sender_id" => {
+            "@type" => "messageSenderUser",
+            "user_id" => 42
+          },
+          "content" => {
+            "@type" => "messageText",
+            "text" => { "text" => "hello" }
+          }
+        }
+      ]
+    end
+
+    bundles = session.send(:extract_history_messages, response, resolve_sender_names: false)
+
+    assert_equal 0, lookups.size
+    assert_equal 1, bundles.size
+    assert_nil bundles.first.dig(:message, :sender_name)
+  end
+
   test "history fetch reduces batch size after timeout" do
     session = build_session
     response = Object.new
@@ -380,9 +416,11 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
 
   def build_session
     Telegram::TdSession.allocate.tap do |session|
+      session.instance_variable_set(:@account_id, 1)
       session.instance_variable_set(:@id, "test-session")
       session.instance_variable_set(:@mutex, Mutex.new)
       session.instance_variable_set(:@operation_mutex, Mutex.new)
+      session.instance_variable_set(:@sender_name_cache, {})
     end
   end
 

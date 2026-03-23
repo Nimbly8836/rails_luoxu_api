@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_03_19_121000) do
+ActiveRecord::Schema[8.0].define(version: 2026_03_23_150746) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pgroonga"
@@ -123,6 +123,10 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_19_121000) do
     t.binary "avatar_small_data"
     t.string "avatar_small_content_type"
     t.datetime "avatar_small_fetched_at"
+    t.bigint "loaded_min_message_id"
+    t.bigint "loaded_max_message_id"
+    t.bigint "loaded_min_td_message_id"
+    t.bigint "loaded_max_td_message_id"
     t.index ["synced_at"], name: "index_telegram_chats_on_synced_at"
     t.index ["td_chat_id"], name: "index_telegram_chats_on_td_chat_id"
     t.index ["telegram_account_id", "td_chat_id"], name: "index_telegram_chats_on_telegram_account_id_and_td_chat_id", unique: true

@@ -238,6 +238,7 @@ module Telegram
           existing_min_message_id = state[:existing_min_message_id]
           existing_max_td_message_id = state[:existing_max_td_message_id]
           existing_min_td_message_id = state[:existing_min_td_message_id]
+          loaded_frontier = history_frontier_from_state(state)
           chat_title = state[:chat_title]
           last_message_id = nil
           precheck_error = nil
@@ -256,6 +257,10 @@ module Telegram
           chat_title = precheck[:chat_title] if precheck[:chat_title].present?
           last_message_id = precheck[:last_message_id]
           precheck_error = precheck[:precheck_error]
+          if supports_chat_history_frontier? && !chat_known_to_account && chat_title.present?
+            ensure_chat_record_for_history_frontier(chat_id:, chat_title:)
+            chat_known_to_account = true
+          end
 
           from_message_id = 0
           chat_upserted = 0
@@ -303,7 +308,7 @@ module Telegram
 
               chat_fetched += fetched_count
 
-              message_bundles = extract_history_messages(response)
+              message_bundles = extract_history_messages(response, resolve_sender_names: false)
               message_bundles = message_bundles.sort_by { |bundle| -bundle[:message][:message_id].to_i }
               chat_parsed += message_bundles.size
               break if message_bundles.empty?
@@ -338,9 +343,11 @@ module Telegram
               end
 
               upsert_usernames_from(message_bundles)
-              upserted = upsert_messages_bulk(message_bundles.map { |bundle| bundle[:message] })
+              message_attrs = message_bundles.map { |bundle| bundle[:message] }
+              upserted = upsert_messages_bulk(message_attrs)
               result[:upserted] += upserted
               chat_upserted += upserted
+              merge_history_frontier!(loaded_frontier, message_attrs)
 
               oldest_td_message_id = message_bundles.map { |bundle| bundle[:td_message_id].to_i }.min.to_i
               break if oldest_td_message_id <= 0
@@ -365,7 +372,8 @@ module Telegram
               existing_min_td_message_id:,
               per_chat_limit:,
               batch_limit:,
-              delay:
+              delay:,
+              loaded_frontier:
             )
             result[:upserted] += backfill[:upserted]
             chat_upserted += backfill[:upserted]
@@ -376,13 +384,19 @@ module Telegram
             existing_min_td_message_id = backfill[:new_min_td_message_id] if backfill[:new_min_td_message_id].positive?
           end
 
+          persist_chat_history_frontier!(
+            chat_id:,
+            frontier: loaded_frontier,
+            chat_title:
+          )
+
           result[:details] << {
             chat_id:,
             chat_known_to_account:,
-            existing_max_message_id: existing_max_message_id.positive? ? existing_max_message_id : nil,
-            existing_min_message_id: existing_min_message_id.positive? ? existing_min_message_id : nil,
-            existing_max_td_message_id: existing_max_td_message_id.positive? ? existing_max_td_message_id : nil,
-            existing_min_td_message_id: existing_min_td_message_id.positive? ? existing_min_td_message_id : nil,
+            existing_max_message_id: history_frontier_value(loaded_frontier[:max_message_id]),
+            existing_min_message_id: history_frontier_value(loaded_frontier[:min_message_id]),
+            existing_max_td_message_id: history_frontier_value(loaded_frontier[:max_td_message_id]),
+            existing_min_td_message_id: history_frontier_value(loaded_frontier[:min_td_message_id]),
             chat_title:,
             last_message_id:,
             precheck_error:,
@@ -407,6 +421,10 @@ module Telegram
             chat_known_to_account:,
             chat_title:,
             last_message_id:,
+            existing_max_message_id: history_frontier_value(loaded_frontier[:max_message_id]),
+            existing_min_message_id: history_frontier_value(loaded_frontier[:min_message_id]),
+            existing_max_td_message_id: history_frontier_value(loaded_frontier[:max_td_message_id]),
+            existing_min_td_message_id: history_frontier_value(loaded_frontier[:min_td_message_id]),
             precheck_error:,
             mode:,
             batches:,
@@ -425,7 +443,7 @@ module Telegram
       end
     end
 
-    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, existing_min_td_message_id:, per_chat_limit:, batch_limit:, delay:)
+    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, existing_min_td_message_id:, per_chat_limit:, batch_limit:, delay:, loaded_frontier:)
       result = default_backfill_result(
         existing_min_message_id:,
         existing_min_td_message_id:
@@ -457,7 +475,7 @@ module Telegram
         result[:batches] += 1
         result[:fetched] += extract_history_count(response)
 
-        message_bundles = extract_history_messages(response)
+        message_bundles = extract_history_messages(response, resolve_sender_names: false)
         result[:parsed] += message_bundles.size
         if message_bundles.empty?
           result[:reached_start] = true
@@ -482,8 +500,10 @@ module Telegram
 
         if insertable_bundles.any?
           upsert_usernames_from(insertable_bundles)
-          upserted = upsert_messages_bulk(insertable_bundles.map { |bundle| bundle[:message] })
+          message_attrs = insertable_bundles.map { |bundle| bundle[:message] }
+          upserted = upsert_messages_bulk(message_attrs)
           result[:upserted] += upserted
+          merge_history_frontier!(loaded_frontier, message_attrs)
 
           current_min = insertable_bundles.map { |bundle| bundle[:message][:message_id].to_i }.min.to_i
           min_message_id = current_min if current_min.positive? && current_min < min_message_id
@@ -660,26 +680,49 @@ module Telegram
       ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq
       return {} if ids.empty?
 
-      title_lookup = TelegramChat.where(telegram_account_id: @account_id, td_chat_id: ids)
-                                 .order(updated_at: :desc)
-                                 .pluck(:td_chat_id, :title)
-                                 .each_with_object({}) do |(chat_id, title), memo|
-        memo[chat_id.to_i] ||= title
-      end
-
       states = ids.each_with_object({}) do |chat_id, memo|
-        memo[chat_id] = default_history_sync_state.merge(
-          chat_known_to_account: title_lookup.key?(chat_id),
-          chat_title: title_lookup[chat_id]
-        )
+        memo[chat_id] = default_history_sync_state
       end
 
-      rows = history_sync_state_rows(ids)
+      chat_rows = TelegramChat.where(telegram_account_id: @account_id, td_chat_id: ids)
+      if supports_chat_history_frontier?
+        chat_rows.pluck(
+          :td_chat_id,
+          :title,
+          :loaded_min_message_id,
+          :loaded_max_message_id,
+          :loaded_min_td_message_id,
+          :loaded_max_td_message_id
+        ).each do |chat_id, title, min_message_id, max_message_id, min_td_message_id, max_td_message_id|
+          key = chat_id.to_i
+          states[key] = default_history_sync_state.merge(
+            chat_known_to_account: true,
+            chat_title: title,
+            existing_min_message_id: min_message_id.to_i,
+            existing_max_message_id: max_message_id.to_i,
+            existing_min_td_message_id: min_td_message_id.to_i,
+            existing_max_td_message_id: max_td_message_id.to_i
+          )
+        end
+      else
+        chat_rows.pluck(:td_chat_id, :title).each do |chat_id, title|
+          key = chat_id.to_i
+          states[key] = default_history_sync_state.merge(
+            chat_known_to_account: true,
+            chat_title: title
+          )
+        end
+      end
+
+      ids_needing_fallback = states.filter_map do |chat_id, state|
+        chat_id unless history_frontier_present?(history_frontier_from_state(state))
+      end
+      rows = history_sync_state_rows(ids_needing_fallback)
       rows.each do |chat_id, max_message_id, min_message_id, max_td_message_id, min_td_message_id|
         key = chat_id.to_i
         states[key] ||= default_history_sync_state
         states[key] = states[key].merge(
-          chat_known_to_account: true,
+          chat_known_to_account: states[key][:chat_known_to_account],
           existing_max_message_id: max_message_id.to_i,
           existing_min_message_id: min_message_id.to_i,
           existing_max_td_message_id: max_td_message_id.to_i,
@@ -691,6 +734,9 @@ module Telegram
     end
 
     def history_sync_state_rows(chat_ids)
+      ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq
+      return [] if ids.empty?
+
       scope = TelegramMessage.where(telegram_account_id: @account_id, td_chat_id: chat_ids).group(:td_chat_id)
       if supports_td_message_id_storage?
         scope.pluck(
@@ -713,11 +759,89 @@ module Telegram
       {
         chat_known_to_account: false,
         chat_title: nil,
-        existing_max_message_id: 0,
         existing_min_message_id: 0,
-        existing_max_td_message_id: 0,
-        existing_min_td_message_id: 0
+        existing_max_message_id: 0,
+        existing_min_td_message_id: 0,
+        existing_max_td_message_id: 0
       }
+    end
+
+    def history_frontier_from_state(state)
+      {
+        min_message_id: state[:existing_min_message_id].to_i,
+        max_message_id: state[:existing_max_message_id].to_i,
+        min_td_message_id: state[:existing_min_td_message_id].to_i,
+        max_td_message_id: state[:existing_max_td_message_id].to_i
+      }
+    end
+
+    def history_frontier_from_messages(messages)
+      rows = Array(messages)
+      return default_history_frontier if rows.empty?
+
+      {
+        min_message_id: rows.map { |attrs| attrs[:message_id].to_i }.select(&:positive?).min.to_i,
+        max_message_id: rows.map { |attrs| attrs[:message_id].to_i }.select(&:positive?).max.to_i,
+        min_td_message_id: rows.map { |attrs| attrs[:td_message_id].to_i }.select(&:positive?).min.to_i,
+        max_td_message_id: rows.map { |attrs| attrs[:td_message_id].to_i }.select(&:positive?).max.to_i
+      }
+    end
+
+    def default_history_frontier
+      {
+        min_message_id: 0,
+        max_message_id: 0,
+        min_td_message_id: 0,
+        max_td_message_id: 0
+      }
+    end
+
+    def merge_history_frontier!(frontier, messages)
+      next_frontier = history_frontier_from_messages(messages)
+      return frontier unless history_frontier_present?(next_frontier)
+
+      frontier[:min_message_id] = merge_history_frontier_min(frontier[:min_message_id], next_frontier[:min_message_id])
+      frontier[:max_message_id] = merge_history_frontier_max(frontier[:max_message_id], next_frontier[:max_message_id])
+      frontier[:min_td_message_id] = merge_history_frontier_min(frontier[:min_td_message_id], next_frontier[:min_td_message_id])
+      frontier[:max_td_message_id] = merge_history_frontier_max(frontier[:max_td_message_id], next_frontier[:max_td_message_id])
+      frontier
+    end
+
+    def merge_history_frontier_min(current_value, next_value)
+      current = current_value.to_i
+      candidate = next_value.to_i
+      return current if candidate <= 0
+      return candidate if current <= 0
+
+      [ current, candidate ].min
+    end
+
+    def merge_history_frontier_max(current_value, next_value)
+      current = current_value.to_i
+      candidate = next_value.to_i
+      return current if candidate <= 0
+      return candidate if current <= 0
+
+      [ current, candidate ].max
+    end
+
+    def history_frontier_present?(frontier)
+      values = frontier.values_at(:min_message_id, :max_message_id, :min_td_message_id, :max_td_message_id)
+      values.any? { |value| value.to_i.positive? }
+    end
+
+    def history_frontier_value(value)
+      numeric = value.to_i
+      numeric.positive? ? numeric : nil
+    end
+
+    def supports_chat_history_frontier?
+      @supports_chat_history_frontier ||= %w[
+        loaded_min_message_id
+        loaded_max_message_id
+        loaded_min_td_message_id
+        loaded_max_td_message_id
+      ].all? { |column| TelegramChat.column_names.include?(column) }
     end
 
     def default_backfill_result(existing_min_message_id:, existing_min_td_message_id:)
@@ -733,6 +857,67 @@ module Telegram
         new_min_message_id: existing_min_message_id.to_i,
         new_min_td_message_id: existing_min_td_message_id.to_i
       }
+    end
+
+    def persist_chat_history_frontier!(chat_id:, frontier:, chat_title: nil)
+      return unless supports_chat_history_frontier?
+      return unless history_frontier_present?(frontier)
+
+      ensure_chat_record_for_history_frontier(chat_id:, chat_title:)
+      now = Time.current
+      TelegramChat.where(telegram_account_id: @account_id, td_chat_id: chat_id.to_i).update_all(
+        [
+          <<~SQL.squish,
+            loaded_min_message_id = CASE
+              WHEN loaded_min_message_id IS NULL OR loaded_min_message_id <= 0 THEN ?
+              ELSE LEAST(loaded_min_message_id, ?)
+            END,
+            loaded_max_message_id = CASE
+              WHEN loaded_max_message_id IS NULL OR loaded_max_message_id <= 0 THEN ?
+              ELSE GREATEST(loaded_max_message_id, ?)
+            END,
+            loaded_min_td_message_id = CASE
+              WHEN loaded_min_td_message_id IS NULL OR loaded_min_td_message_id <= 0 THEN ?
+              ELSE LEAST(loaded_min_td_message_id, ?)
+            END,
+            loaded_max_td_message_id = CASE
+              WHEN loaded_max_td_message_id IS NULL OR loaded_max_td_message_id <= 0 THEN ?
+              ELSE GREATEST(loaded_max_td_message_id, ?)
+            END,
+            updated_at = ?
+          SQL
+          frontier[:min_message_id].to_i,
+          frontier[:min_message_id].to_i,
+          frontier[:max_message_id].to_i,
+          frontier[:max_message_id].to_i,
+          frontier[:min_td_message_id].to_i,
+          frontier[:min_td_message_id].to_i,
+          frontier[:max_td_message_id].to_i,
+          frontier[:max_td_message_id].to_i,
+          now
+        ]
+      )
+    end
+
+    def ensure_chat_record_for_history_frontier(chat_id:, chat_title:)
+      return unless chat_title.present?
+
+      now = Time.current
+      TelegramChat.insert_all(
+        [
+          {
+            telegram_account_id: @account_id,
+            td_chat_id: chat_id.to_i,
+            title: chat_title,
+            chat_type: nil,
+            raw_payload: {},
+            synced_at: now,
+            created_at: now,
+            updated_at: now
+          }
+        ],
+        unique_by: :index_telegram_chats_on_telegram_account_id_and_td_chat_id
+      )
     end
 
     def precheck_history_sync_chat(chat_id:, known_chat_title:, history_seed_required:, history_backfill_only:)
@@ -1144,6 +1329,10 @@ module Telegram
 
       upsert_usernames_from([ bundle ])
       upsert_messages_bulk([ payload ])
+      persist_chat_history_frontier!(
+        chat_id: payload[:td_chat_id],
+        frontier: history_frontier_from_messages([ payload ])
+      )
     end
 
     def watched_chat_ids
@@ -1174,7 +1363,7 @@ module Telegram
       lookup
     end
 
-    def extract_history_messages(response)
+    def extract_history_messages(response, resolve_sender_names: true)
       return [] if response.nil?
       messages =
         if response.respond_to?(:messages)
@@ -1182,10 +1371,10 @@ module Telegram
         elsif defined?(TD::Types::Unsupported) && response.is_a?(TD::Types::Unsupported) && response.original_type == "messages"
           raw_messages = response.raw.is_a?(Hash) ? response.raw["messages"] : nil
           raw_messages.is_a?(Array) ? raw_messages : nil
-        end
+      end
       return [] unless messages.respond_to?(:map)
 
-      messages.map { |message| extract_message_bundle(message) }.compact
+      messages.map { |message| extract_message_bundle(message, resolve_sender_names:) }.compact
     end
 
     def extract_history_count(response)
@@ -1322,7 +1511,7 @@ module Telegram
       deduped_messages.size
     end
 
-    def extract_message_bundle(message)
+    def extract_message_bundle(message, resolve_sender_names: true)
       raw = message_to_hash(message)
       return nil unless raw.is_a?(Hash)
 
@@ -1340,7 +1529,7 @@ module Telegram
         td_chat_id: td_chat_id.to_i,
         message_id: decoded_message_id.to_i,
         td_sender_id: sender["user_id"] || sender["chat_id"],
-        sender_name: resolve_sender_name(sender),
+        sender_name: resolve_sender_name(sender, allow_remote: resolve_sender_names),
         message_at: Time.at(date.to_i),
         text: extract_message_text(raw)
       }
@@ -1527,19 +1716,23 @@ module Telegram
       false
     end
 
-    def resolve_sender_name(sender)
+    def resolve_sender_name(sender, allow_remote: true)
       type = sender["@type"].to_s
       case type
       when "messageSenderUser"
         user_id = sender["user_id"].to_i
         return nil if user_id <= 0
 
-        cached_sender_name("u:#{user_id}") { fetch_user_name(user_id) }
+        cached_sender_name("u:#{user_id}") do
+          next nil unless allow_remote
+
+          fetch_user_name(user_id)
+        end
       when "messageSenderChat"
         chat_id = sender["chat_id"].to_i
         return nil if chat_id.zero?
 
-        cached_sender_name("c:#{chat_id}") { fetch_chat_name(chat_id) }
+        cached_sender_name("c:#{chat_id}") { fetch_chat_name(chat_id, allow_remote:) }
       else
         nil
       end
@@ -1603,9 +1796,10 @@ module Telegram
       nil
     end
 
-    def fetch_chat_name(chat_id)
+    def fetch_chat_name(chat_id, allow_remote: true)
       title = TelegramChat.where(telegram_account_id: @account_id, td_chat_id: chat_id).pick(:title)
       return title if title.present?
+      return nil unless allow_remote
 
       chat = @client.get_chat(chat_id:).value!
       extract_chat_payload(chat)&.dig(:title)
