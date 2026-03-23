@@ -37,6 +37,14 @@ module Telegram
       )
 
       failed_chat_ids = failed_chat_ids_from(sync)
+      continuation_chat_ids = continuation_chat_ids_from(sync) - failed_chat_ids
+      enqueue_continuation_job(
+        account:,
+        chat_ids: continuation_chat_ids,
+        limit_per_chat: normalized_limit_per_chat,
+        wait_seconds: normalized_wait_seconds,
+        reason:
+      )
       return if failed_chat_ids.empty?
 
       if retry_attempt.to_i >= max_retry_attempts
@@ -80,6 +88,16 @@ module Telegram
       seconds.negative? ? 0.0 : seconds
     end
 
+    def continuation_chat_ids_from(sync)
+      details = Array(sync[:details] || sync["details"])
+      details.filter_map do |detail|
+        next unless ActiveModel::Type::Boolean.new.cast(detail[:continuation_required] || detail["continuation_required"])
+
+        chat_id = detail[:chat_id] || detail["chat_id"]
+        chat_id.to_i if chat_id.present?
+      end.select(&:nonzero?).uniq.sort
+    end
+
     def failed_chat_ids_from(sync)
       details = Array(sync[:details] || sync["details"])
       ids = details.filter_map do |detail|
@@ -99,6 +117,27 @@ module Telegram
       ids.select(&:nonzero?).uniq.sort
     end
 
+    def enqueue_continuation_job(account:, chat_ids:, limit_per_chat:, wait_seconds:, reason:)
+      ids = normalize_chat_ids(chat_ids)
+      return if ids.empty?
+
+      wait_seconds_for_job = continuation_delay_seconds
+      next_reason = reason.to_s.include?(":continue") ? reason.to_s : "#{reason}:continue"
+      job = self.class.set(wait: wait_seconds_for_job.seconds).perform_later(
+        account_uuid: account.uuid,
+        chat_ids: ids,
+        use_watched_chat_ids: false,
+        limit_per_chat: limit_per_chat,
+        wait_seconds: wait_seconds,
+        reason: next_reason,
+        retry_attempt: 0
+      )
+      Rails.logger.info(
+        "Queued continuation message sync for account #{account.uuid} chats=#{ids.inspect} " \
+        "wait=#{wait_seconds_for_job}s sync_wait=#{wait_seconds}s job_id=#{job.job_id}"
+      )
+    end
+
     def next_wait_seconds_for(current_wait_seconds)
       base_wait = current_wait_seconds.to_f.positive? ? current_wait_seconds.to_f : default_wait_seconds
       max_wait = ENV.fetch("TELEGRAM_MESSAGE_SYNC_JOB_MAX_WAIT_SECONDS", "60").to_f
@@ -116,8 +155,12 @@ module Telegram
       ENV.fetch("TELEGRAM_MESSAGE_SYNC_JOB_RETRY_ATTEMPTS", "12").to_i.clamp(1, 100)
     end
 
+    def continuation_delay_seconds
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_CONTINUATION_WAIT_SECONDS", "1").to_f.clamp(0.0, 60.0)
+    end
+
     def default_wait_seconds
-      ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "5").to_f
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "0.5").to_f
     end
   end
 end

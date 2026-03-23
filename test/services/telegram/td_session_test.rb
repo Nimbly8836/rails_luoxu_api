@@ -141,6 +141,49 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal false, session.send(:history_backfill_required?, existing_min_message_id: 0, existing_min_td_message_id: 0)
   end
 
+  test "backfill reports continuation when page budget is reached" do
+    session = build_session
+    pages = [
+      [
+        {
+          td_message_id: 900,
+          message: { td_chat_id: 123, message_id: 90, message_at: Time.current }
+        },
+        {
+          td_message_id: 850,
+          message: { td_chat_id: 123, message_id: 85, message_at: Time.current }
+        }
+      ]
+    ]
+
+    session.define_singleton_method(:fetch_history_messages_page) { |_kwargs = nil, **| :page }
+    session.define_singleton_method(:extract_history_count) { |_response| 2 }
+    session.define_singleton_method(:extract_history_messages) { |_response| pages.shift || [] }
+    session.define_singleton_method(:upsert_usernames_from) { |_bundles| nil }
+    session.define_singleton_method(:upsert_messages_bulk) { |messages| messages.size }
+    session.define_singleton_method(:sleep) { |_seconds| nil }
+
+    with_env("TELEGRAM_MESSAGE_SYNC_BACKFILL_MAX_PAGES" => "1") do
+      result = session.send(
+        :backfill_older_messages_for_chat,
+        chat_id: 123,
+        existing_min_message_id: 100,
+        existing_min_td_message_id: 1_000,
+        per_chat_limit: nil,
+        batch_limit: 200,
+        delay: 0.25
+      )
+
+      assert_equal true, result[:attempted]
+      assert_equal false, result[:reached_start]
+      assert_equal true, result[:continuation_required]
+      assert_equal "backfill_page_budget_reached", result[:continuation_reason]
+      assert_equal 2, result[:upserted]
+      assert_equal 85, result[:new_min_message_id]
+      assert_equal 850, result[:new_min_td_message_id]
+    end
+  end
+
   test "sync_messages_for_chats_async enqueues a message sync job" do
     session = build_session
 
@@ -151,7 +194,7 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert result[:job_id].present?
     assert_equal [ 1, 3 ], result[:chat_ids]
     assert_equal false, result[:watched_chat_ids]
-    assert_equal 5.0, result[:wait_seconds]
+    assert_equal 0.5, result[:wait_seconds]
     assert_equal 20, result[:limit_per_chat]
     assert_equal 1, enqueued_jobs.size
 
@@ -162,7 +205,7 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal [ 1, 3 ], args["chat_ids"]
     assert_equal false, args["use_watched_chat_ids"]
     assert_equal 20, args["limit_per_chat"]
-    assert_equal 5.0, args["wait_seconds"]
+    assert_equal 0.5, args["wait_seconds"]
     assert_equal "manual", args["reason"]
     assert_equal 0, args["retry_attempt"]
   end

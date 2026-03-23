@@ -84,8 +84,84 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
       )
     end
 
-    assert_equal [ [ [ 3, 4 ], nil, 5.0 ] ], calls
+    assert_equal [ [ [ 3, 4 ], nil, 0.5 ] ], calls
     assert_equal 0, enqueued_jobs.size
+  end
+
+  test "perform enqueues continuation when backfill needs another pass" do
+    account = create_account
+    calls = []
+    session = build_session do |chat_ids:, limit_per_chat:, wait_seconds:|
+      calls << [ chat_ids, limit_per_chat, wait_seconds ]
+      {
+        failed: 0,
+        errors: [],
+        details: [ { chat_id: 4, continuation_required: true } ]
+      }
+    end
+
+    with_env("TELEGRAM_MESSAGE_SYNC_CONTINUATION_WAIT_SECONDS" => "1.5") do
+      with_runtime_session(account, session) do
+        Telegram::MessageSyncJob.perform_now(
+          account_uuid: account.uuid,
+          chat_ids: [ 4 ],
+          limit_per_chat: nil,
+          wait_seconds: nil,
+          reason: "manual",
+          retry_attempt: 0
+        )
+      end
+    end
+
+    assert_equal [ [ [ 4 ], nil, 0.5 ] ], calls
+    assert_equal 1, enqueued_jobs.size
+
+    job = enqueued_jobs.last
+    assert_equal Telegram::MessageSyncJob, job[:job]
+    args = job[:args].first
+    assert_equal account.uuid, args["account_uuid"]
+    assert_equal [ 4 ], args["chat_ids"]
+    assert_equal false, args["use_watched_chat_ids"]
+    assert_nil args["limit_per_chat"]
+    assert_equal 0.5, args["wait_seconds"]
+    assert_equal "manual:continue", args["reason"]
+    assert_equal 0, args["retry_attempt"]
+    assert_in_delta 1.5.seconds.from_now.to_f, job[:at], 3.0
+  end
+
+  test "perform does not enqueue continuation for failed chats" do
+    account = create_account
+    session = build_session do |_chat_ids:, **|
+      {
+        failed: 1,
+        errors: [ "chat 7: Timeout error" ],
+        details: [
+          { chat_id: 7, continuation_required: true, error: "Timeout error" }
+        ]
+      }
+    end
+
+    with_env(
+      "TELEGRAM_MESSAGE_SYNC_JOB_RETRY_BASE_WAIT_SECONDS" => "60",
+      "TELEGRAM_MESSAGE_SYNC_JOB_RETRY_MAX_WAIT_SECONDS" => "1800",
+      "TELEGRAM_MESSAGE_SYNC_JOB_MAX_WAIT_SECONDS" => "60"
+    ) do
+      with_runtime_session(account, session) do
+        Telegram::MessageSyncJob.perform_now(
+          account_uuid: account.uuid,
+          chat_ids: [ 7 ],
+          limit_per_chat: nil,
+          wait_seconds: nil,
+          reason: "manual",
+          retry_attempt: 0
+        )
+      end
+    end
+
+    assert_equal 1, enqueued_jobs.size
+    args = enqueued_jobs.last[:args].first
+    assert_equal [ 7 ], args["chat_ids"]
+    assert_equal "manual:retry1", args["reason"]
   end
 
   private
