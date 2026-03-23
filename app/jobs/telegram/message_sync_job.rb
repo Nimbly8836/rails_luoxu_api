@@ -2,6 +2,9 @@
 
 module Telegram
   class MessageSyncJob < ApplicationJob
+    PRIMARY_QUEUE = "telegram_sync"
+    BACKFILL_QUEUE = "telegram_sync_backfill"
+
     queue_as :telegram_sync
 
     limits_concurrency \
@@ -27,6 +30,22 @@ module Telegram
 
       normalized_wait_seconds = normalize_wait_seconds(wait_seconds)
       normalized_limit_per_chat = normalize_limit_per_chat(limit_per_chat)
+      if ids.many?
+        jobs = enqueue_chat_jobs(
+          account_uuid: account.uuid,
+          chat_ids: ids,
+          limit_per_chat: normalized_limit_per_chat,
+          wait_seconds: normalized_wait_seconds,
+          reason: reason,
+          retry_attempt: retry_attempt
+        )
+        Rails.logger.info(
+          "Fanned out message sync for account #{account.uuid} reason=#{reason} retry_attempt=#{retry_attempt} " \
+          "chat_ids=#{ids.inspect} job_ids=#{jobs.map(&:job_id)}"
+        )
+        return
+      end
+
       sync = session.sync_messages_for_chats(
         chat_ids: ids,
         limit_per_chat: normalized_limit_per_chat,
@@ -57,18 +76,19 @@ module Telegram
       next_retry_attempt = retry_attempt.to_i + 1
       retry_delay_seconds = retry_delay_seconds_for(next_retry_attempt)
       next_wait_seconds = next_wait_seconds_for(normalized_wait_seconds)
-      retry_job = self.class.set(wait: retry_delay_seconds.seconds).perform_later(
+      retry_jobs = enqueue_chat_jobs(
         account_uuid: account.uuid,
         chat_ids: failed_chat_ids,
-        use_watched_chat_ids: false,
         limit_per_chat: normalized_limit_per_chat,
         wait_seconds: next_wait_seconds,
         reason: "#{reason}:retry#{next_retry_attempt}",
-        retry_attempt: next_retry_attempt
+        retry_attempt: next_retry_attempt,
+        wait: retry_delay_seconds.seconds
       )
       Rails.logger.warn(
         "Re-enqueued message sync for account #{account.uuid} chats=#{failed_chat_ids.inspect} " \
-        "retry_attempt=#{next_retry_attempt} wait=#{retry_delay_seconds}s sync_wait=#{next_wait_seconds}s job_id=#{retry_job.job_id}"
+        "retry_attempt=#{next_retry_attempt} wait=#{retry_delay_seconds}s sync_wait=#{next_wait_seconds}s " \
+        "job_ids=#{retry_jobs.map(&:job_id)}"
       )
     end
 
@@ -123,19 +143,48 @@ module Telegram
 
       wait_seconds_for_job = continuation_delay_seconds
       next_reason = reason.to_s.include?(":continue") ? reason.to_s : "#{reason}:continue"
-      job = self.class.set(wait: wait_seconds_for_job.seconds).perform_later(
+      jobs = enqueue_chat_jobs(
         account_uuid: account.uuid,
         chat_ids: ids,
-        use_watched_chat_ids: false,
         limit_per_chat: limit_per_chat,
         wait_seconds: wait_seconds,
         reason: next_reason,
-        retry_attempt: 0
+        retry_attempt: 0,
+        wait: wait_seconds_for_job.seconds
       )
       Rails.logger.info(
         "Queued continuation message sync for account #{account.uuid} chats=#{ids.inspect} " \
-        "wait=#{wait_seconds_for_job}s sync_wait=#{wait_seconds}s job_id=#{job.job_id}"
+        "wait=#{wait_seconds_for_job}s sync_wait=#{wait_seconds}s job_ids=#{jobs.map(&:job_id)}"
       )
+    end
+
+    def enqueue_chat_jobs(account_uuid:, chat_ids:, limit_per_chat:, wait_seconds:, reason:, retry_attempt:, wait: nil)
+      ids = normalize_chat_ids(chat_ids)
+      return [] if ids.empty?
+
+      job_options = { queue: queue_name_for(reason) }
+      job_options[:wait] = wait unless wait.nil?
+      scope = self.class.set(**job_options)
+
+      ids.map do |chat_id|
+        scope.perform_later(
+          account_uuid: account_uuid,
+          chat_ids: [ chat_id ],
+          use_watched_chat_ids: false,
+          limit_per_chat: limit_per_chat,
+          wait_seconds: wait_seconds,
+          reason: reason.to_s,
+          retry_attempt: retry_attempt
+        )
+      end
+    end
+
+    def queue_name_for(reason)
+      continuation_reason?(reason) ? BACKFILL_QUEUE : PRIMARY_QUEUE
+    end
+
+    def continuation_reason?(reason)
+      reason.to_s.include?(":continue")
     end
 
     def next_wait_seconds_for(current_wait_seconds)

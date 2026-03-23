@@ -39,7 +39,7 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
       with_runtime_session(account, session) do
         Telegram::MessageSyncJob.perform_now(
           account_uuid: account.uuid,
-          chat_ids: [ 2, 1 ],
+          chat_ids: [ 2 ],
           limit_per_chat: 20,
           wait_seconds: 5,
           reason: "manual",
@@ -48,7 +48,7 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
       end
     end
 
-    assert_equal [ [ [ 1, 2 ], 20, 5.0 ] ], calls
+    assert_equal [ [ [ 2 ], 20, 5.0 ] ], calls
     assert_equal 1, enqueued_jobs.size
 
     job = enqueued_jobs.last
@@ -61,15 +61,14 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
     assert_equal 10.0, args["wait_seconds"]
     assert_equal "manual:retry1", args["reason"]
     assert_equal 1, args["retry_attempt"]
+    assert_equal "telegram_sync", job[:queue]
     assert_in_delta 60.seconds.from_now.to_f, job[:at], 3.0
   end
 
   test "perform uses watched chat ids when requested" do
     account = create_account
-    calls = []
-    session = build_session(watched_chat_ids: [ 3, 4 ]) do |chat_ids:, limit_per_chat:, wait_seconds:|
-      calls << [ chat_ids, limit_per_chat, wait_seconds ]
-      { failed: 0, errors: [], details: [] }
+    session = build_session(watched_chat_ids: [ 3, 4 ]) do |chat_ids:, **|
+      raise "watched chat fan-out should not sync in the parent job"
     end
 
     with_runtime_session(account, session) do
@@ -84,8 +83,32 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
       )
     end
 
-    assert_equal [ [ [ 3, 4 ], nil, 5.0 ] ], calls
-    assert_equal 0, enqueued_jobs.size
+    assert_equal 2, enqueued_jobs.size
+    assert_equal [ [ 3 ], [ 4 ] ], enqueued_jobs.map { |job| job[:args].first["chat_ids"] }
+    assert_equal [ "telegram_sync", "telegram_sync" ], enqueued_jobs.map { |job| job[:queue] }
+  end
+
+  test "perform fans out explicit multi chat sync into one job per chat" do
+    account = create_account
+    session = build_session do |chat_ids:, **|
+      raise "multi chat fan-out should not sync in the parent job"
+    end
+
+    with_runtime_session(account, session) do
+      Telegram::MessageSyncJob.perform_now(
+        account_uuid: account.uuid,
+        chat_ids: [ 3, 1, 3 ],
+        use_watched_chat_ids: false,
+        limit_per_chat: 20,
+        wait_seconds: 5,
+        reason: "manual",
+        retry_attempt: 0
+      )
+    end
+
+    assert_equal 2, enqueued_jobs.size
+    assert_equal [ [ 1 ], [ 3 ] ], enqueued_jobs.map { |job| job[:args].first["chat_ids"] }
+    assert_equal [ "telegram_sync", "telegram_sync" ], enqueued_jobs.map { |job| job[:queue] }
   end
 
   test "perform enqueues continuation when backfill needs another pass" do
@@ -126,12 +149,13 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
     assert_equal 5.0, args["wait_seconds"]
     assert_equal "manual:continue", args["reason"]
     assert_equal 0, args["retry_attempt"]
+    assert_equal "telegram_sync_backfill", job[:queue]
     assert_in_delta 1.5.seconds.from_now.to_f, job[:at], 3.0
   end
 
   test "perform does not enqueue continuation for failed chats" do
     account = create_account
-    session = build_session do |_chat_ids:, **|
+    session = build_session do |chat_ids:, **|
       {
         failed: 1,
         errors: [ "chat 7: Timeout error" ],
@@ -162,6 +186,7 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
     args = enqueued_jobs.last[:args].first
     assert_equal [ 7 ], args["chat_ids"]
     assert_equal "manual:retry1", args["reason"]
+    assert_equal "telegram_sync", enqueued_jobs.last[:queue]
   end
 
   private

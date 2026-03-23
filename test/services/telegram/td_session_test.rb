@@ -358,6 +358,50 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     end
   end
 
+  test "full history seed reports continuation when page budget is reached" do
+    session = build_session
+    page = [
+      {
+        td_message_id: 900,
+        message: { td_chat_id: 123, message_id: 90, message_at: Time.current }
+      },
+      {
+        td_message_id: 850,
+        message: { td_chat_id: 123, message_id: 85, message_at: Time.current }
+      }
+    ]
+
+    session.define_singleton_method(:with_operation_lock) { |_kwargs = nil, **, &block| block.call }
+    session.define_singleton_method(:raise_if_disposed!) { nil }
+    session.define_singleton_method(:wait_until_ready!) { nil }
+    session.define_singleton_method(:history_sync_state_lookup) do |_ids|
+      { 123 => send(:default_history_sync_state) }
+    end
+    session.define_singleton_method(:precheck_history_sync_chat) do |chat_id:, **|
+      { chat_title: "chat-#{chat_id}", last_message_id: 900, precheck_error: nil }
+    end
+    session.define_singleton_method(:supports_chat_history_frontier?) { false }
+    session.define_singleton_method(:fetch_history_messages_page) { |_kwargs = nil, **| :page }
+    session.define_singleton_method(:extract_history_count) { |_response| 2 }
+    session.define_singleton_method(:describe_response) { |_response| { class: "TestResponse", message_count: 2 } }
+    session.define_singleton_method(:extract_history_messages) { |_response, **| page }
+    session.define_singleton_method(:upsert_usernames_from) { |_bundles| nil }
+    session.define_singleton_method(:upsert_messages_bulk) { |messages| messages.size }
+    session.define_singleton_method(:persist_chat_history_frontier!) { |**| nil }
+    session.define_singleton_method(:sleep) { |_seconds| nil }
+
+    with_env("TELEGRAM_MESSAGE_SYNC_SEED_MAX_PAGES" => "1") do
+      result = session.sync_messages_for_chats(chat_ids: [ 123 ], limit_per_chat: nil, wait_seconds: nil)
+
+      assert_equal 1, result[:details].size
+      detail = result[:details].first
+      assert_equal 2, result[:upserted]
+      assert_equal "full_history", detail[:mode]
+      assert_equal true, detail[:continuation_required]
+      assert_equal "seed_page_budget_reached", detail[:continuation_reason]
+    end
+  end
+
   test "sync_messages_for_chats_async enqueues a message sync job" do
     session = build_session
 

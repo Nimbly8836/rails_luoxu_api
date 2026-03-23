@@ -277,6 +277,8 @@ module Telegram
           end
           seen_message_ids = {}
           stalled_pages = 0
+          continuation_required = false
+          continuation_reason = nil
           backfill = default_backfill_result(
             existing_min_message_id:,
             existing_min_td_message_id:
@@ -355,6 +357,16 @@ module Telegram
               break if oldest_td_message_id <= 0
               break if reached_existing_boundary
 
+              if history_seed_page_budget_reached?(
+                history_seed_required:,
+                per_chat_limit:,
+                batches:
+              )
+                continuation_required = true
+                continuation_reason = "seed_page_budget_reached"
+                break
+              end
+
               if oldest_td_message_id == from_message_id
                 stalled_pages += 1
                 break if stalled_pages >= 2
@@ -408,8 +420,8 @@ module Telegram
             fetched: chat_fetched,
             parsed: chat_parsed,
             upserted: chat_upserted,
-            continuation_required: backfill[:continuation_required],
-            continuation_reason: backfill[:continuation_reason],
+            continuation_required: continuation_required || backfill[:continuation_required],
+            continuation_reason: continuation_reason || backfill[:continuation_reason],
             backfill: {
               attempted: backfill[:attempted],
               reached_start: backfill[:reached_start]
@@ -553,6 +565,13 @@ module Telegram
       return false if min_message_id <= 1
 
       true
+    end
+
+    def history_seed_page_budget_reached?(history_seed_required:, per_chat_limit:, batches:)
+      return false unless history_seed_required
+      return false if per_chat_limit.present?
+
+      batches.to_i >= initial_history_seed_max_pages
     end
 
     def dispose
@@ -1715,6 +1734,10 @@ module Telegram
 
     def default_message_sync_wait_seconds
       ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "5").to_f
+    end
+
+    def initial_history_seed_max_pages
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_SEED_MAX_PAGES", "5").to_i.clamp(1, 1_000)
     end
 
     def configured_history_batch_limit
