@@ -51,7 +51,8 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     response = Object.new
     client = Object.new
 
-    response.define_singleton_method(:value!) { :history_page }
+    response.define_singleton_method(:messages) { [ :local ] }
+    response.define_singleton_method(:value!) { self }
     client.define_singleton_method(:get_chat_history) { |**| response }
     session.instance_variable_set(:@client, client)
     session.define_singleton_method(:with_td_timeout_retry) do |operation:, chat_id:, from_message_id:, wait_seconds:, limit: nil, &block|
@@ -68,8 +69,67 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
       retry_wait_seconds: 7.5
     )
 
-    assert_equal :history_page, result
-    assert_equal [ [ "get_chat_history", 123, 456, 7.5, 20 ] ], captured_wait_seconds
+    assert_same response, result
+    assert_equal [ [ "get_chat_history_local", 123, 456, 7.5, 20 ] ], captured_wait_seconds
+  end
+
+  test "history fetch prefers local tdlib database before remote" do
+    session = build_session
+    client = Object.new
+    calls = []
+    local_response = Object.new
+
+    local_response.define_singleton_method(:messages) { [ :local ] }
+    local_response.define_singleton_method(:value!) { self }
+    client.define_singleton_method(:get_chat_history) do |**kwargs|
+      calls << kwargs
+      local_response
+    end
+    session.instance_variable_set(:@client, client)
+
+    result = session.send(
+      :fetch_history_messages_page,
+      chat_id: 123,
+      from_message_id: 456,
+      offset: 0,
+      limit: 20,
+      retry_wait_seconds: 7.5
+    )
+
+    assert_same local_response, result
+    assert_equal 1, calls.size
+    assert_equal true, calls.first[:only_local]
+  end
+
+  test "history fetch falls back to remote when local tdlib database is empty" do
+    session = build_session
+    client = Object.new
+    calls = []
+    local_response = Object.new
+    remote_response = Object.new
+
+    local_response.define_singleton_method(:messages) { [] }
+    local_response.define_singleton_method(:value!) { self }
+    remote_response.define_singleton_method(:messages) { [ :remote ] }
+    remote_response.define_singleton_method(:value!) { self }
+    client.define_singleton_method(:get_chat_history) do |**kwargs|
+      calls << kwargs
+      kwargs[:only_local] ? local_response : remote_response
+    end
+    session.instance_variable_set(:@client, client)
+
+    result = session.send(
+      :fetch_history_messages_page,
+      chat_id: 123,
+      from_message_id: 456,
+      offset: 0,
+      limit: 20,
+      retry_wait_seconds: 7.5
+    )
+
+    assert_same remote_response, result
+    assert_equal 2, calls.size
+    assert_equal [ true, false ], calls.map { |call| call[:only_local] }
   end
 
   test "history fetch reduces batch size after timeout" do
@@ -78,7 +138,8 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     client = Object.new
     requested_limits = []
 
-    response.define_singleton_method(:value!) { :history_page }
+    response.define_singleton_method(:messages) { [ :local ] }
+    response.define_singleton_method(:value!) { self }
     client.define_singleton_method(:get_chat_history) do |**kwargs|
       requested_limits << kwargs[:limit]
       raise Timeout::Error, "Timeout error" if requested_limits.one?
@@ -100,7 +161,7 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
         retry_wait_seconds: 7.5
       )
 
-      assert_equal :history_page, result
+      assert_same response, result
       assert_equal [ 50, 25 ], requested_limits
     end
   end
@@ -194,7 +255,7 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert result[:job_id].present?
     assert_equal [ 1, 3 ], result[:chat_ids]
     assert_equal false, result[:watched_chat_ids]
-    assert_equal 0.5, result[:wait_seconds]
+    assert_equal 5.0, result[:wait_seconds]
     assert_equal 20, result[:limit_per_chat]
     assert_equal 1, enqueued_jobs.size
 
@@ -205,7 +266,7 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal [ 1, 3 ], args["chat_ids"]
     assert_equal false, args["use_watched_chat_ids"]
     assert_equal 20, args["limit_per_chat"]
-    assert_equal 0.5, args["wait_seconds"]
+    assert_equal 5.0, args["wait_seconds"]
     assert_equal "manual", args["reason"]
     assert_equal 0, args["retry_attempt"]
   end

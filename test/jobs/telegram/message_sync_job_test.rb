@@ -84,7 +84,7 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
       )
     end
 
-    assert_equal [ [ [ 3, 4 ], nil, 0.5 ] ], calls
+    assert_equal [ [ [ 3, 4 ], nil, 5.0 ] ], calls
     assert_equal 0, enqueued_jobs.size
   end
 
@@ -113,7 +113,7 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
       end
     end
 
-    assert_equal [ [ [ 4 ], nil, 0.5 ] ], calls
+    assert_equal [ [ [ 4 ], nil, 5.0 ] ], calls
     assert_equal 1, enqueued_jobs.size
 
     job = enqueued_jobs.last
@@ -123,7 +123,7 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
     assert_equal [ 4 ], args["chat_ids"]
     assert_equal false, args["use_watched_chat_ids"]
     assert_nil args["limit_per_chat"]
-    assert_equal 0.5, args["wait_seconds"]
+    assert_equal 5.0, args["wait_seconds"]
     assert_equal "manual:continue", args["reason"]
     assert_equal 0, args["retry_attempt"]
     assert_in_delta 1.5.seconds.from_now.to_f, job[:at], 3.0

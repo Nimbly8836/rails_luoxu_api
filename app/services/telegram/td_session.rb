@@ -1224,6 +1224,23 @@ module Telegram
     end
 
     def fetch_history_messages_page(chat_id:, from_message_id:, offset:, limit:, retry_wait_seconds: nil)
+      local_response = fetch_td_history_page_with_adaptive_limit(
+        operation: "get_chat_history_local",
+        chat_id:,
+        from_message_id:,
+        limit:,
+        retry_wait_seconds:
+      ) do |effective_limit|
+        @client.get_chat_history(
+          chat_id:,
+          from_message_id:,
+          offset:,
+          limit: effective_limit,
+          only_local: true
+        ).value!
+      end
+      return local_response if extract_history_count(local_response).positive?
+
       fetch_td_history_page_with_adaptive_limit(
         operation: "get_chat_history",
         chat_id:,
@@ -1437,7 +1454,7 @@ module Telegram
     end
 
     def default_message_sync_wait_seconds
-      ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "0.5").to_f
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "5").to_f
     end
 
     def configured_history_batch_limit

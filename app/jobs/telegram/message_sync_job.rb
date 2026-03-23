@@ -160,7 +160,7 @@ module Telegram
     end
 
     def default_wait_seconds
-      ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "0.5").to_f
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_WAIT_SECONDS", "5").to_f
     end
   end
 end
