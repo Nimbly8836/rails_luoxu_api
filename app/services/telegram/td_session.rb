@@ -267,6 +267,7 @@ module Telegram
           chat_fetched = 0
           chat_parsed = 0
           batches = 0
+          history_fetch_state = default_history_fetch_state
           mode = if history_backfill_only
                    "backfill"
           elsif history_seed_required
@@ -288,7 +289,8 @@ module Telegram
                 from_message_id:,
                 offset: 0,
                 limit: batch_limit,
-                retry_wait_seconds: delay
+                retry_wait_seconds: delay,
+                history_fetch_state:
               )
               batches += 1
               fetched_count = extract_history_count(response)
@@ -373,7 +375,8 @@ module Telegram
               per_chat_limit:,
               batch_limit:,
               delay:,
-              loaded_frontier:
+              loaded_frontier:,
+              history_fetch_state:
             )
             result[:upserted] += backfill[:upserted]
             chat_upserted += backfill[:upserted]
@@ -411,6 +414,7 @@ module Telegram
               attempted: backfill[:attempted],
               reached_start: backfill[:reached_start]
             },
+            local_history: summarize_history_fetch_state(history_fetch_state),
             first_response: first_response_info
           }
         rescue StandardError => e
@@ -434,6 +438,7 @@ module Telegram
             continuation_required: false,
             continuation_reason: nil,
             backfill: { attempted: false, reached_start: false },
+            local_history: summarize_history_fetch_state(history_fetch_state),
             first_response: first_response_info,
             error: e.message
           }
@@ -443,7 +448,7 @@ module Telegram
       end
     end
 
-    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, existing_min_td_message_id:, per_chat_limit:, batch_limit:, delay:, loaded_frontier:)
+    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, existing_min_td_message_id:, per_chat_limit:, batch_limit:, delay:, loaded_frontier:, history_fetch_state:)
       result = default_backfill_result(
         existing_min_message_id:,
         existing_min_td_message_id:
@@ -469,7 +474,8 @@ module Telegram
           from_message_id:,
           offset: 0,
           limit: batch_limit,
-          retry_wait_seconds: delay
+          retry_wait_seconds: delay,
+          history_fetch_state:
         )
         pages += 1
         result[:batches] += 1
@@ -833,6 +839,47 @@ module Telegram
     def history_frontier_value(value)
       numeric = value.to_i
       numeric.positive? ? numeric : nil
+    end
+
+    def default_history_fetch_state
+      {
+        local_enabled: true,
+        local_disabled_reason: nil,
+        local_disabled_from_message_id: nil,
+        local_disabled_error: nil
+      }
+    end
+
+    def local_history_fetch_enabled?(history_fetch_state)
+      return true if history_fetch_state.nil?
+
+      history_fetch_state[:local_enabled] != false
+    end
+
+    def disable_local_history_fetch!(history_fetch_state, chat_id:, from_message_id:, reason:, error_message: nil)
+      return if history_fetch_state.nil?
+      return unless history_fetch_state[:local_enabled]
+
+      history_fetch_state[:local_enabled] = false
+      history_fetch_state[:local_disabled_reason] = reason
+      history_fetch_state[:local_disabled_from_message_id] = from_message_id.to_i
+      history_fetch_state[:local_disabled_error] = error_message
+
+      message = "Disabling TDLib local history fetch for account #{@id} chat=#{chat_id} " \
+                "from_message_id=#{from_message_id} reason=#{reason}"
+      message = "#{message} error=#{error_message}" if error_message.present?
+      reason == "timeout" ? Rails.logger.warn(message) : Rails.logger.info(message)
+    end
+
+    def summarize_history_fetch_state(history_fetch_state)
+      return nil if history_fetch_state.nil?
+
+      {
+        local_enabled: history_fetch_state[:local_enabled],
+        local_disabled_reason: history_fetch_state[:local_disabled_reason],
+        local_disabled_from_message_id: history_fetch_state[:local_disabled_from_message_id],
+        local_disabled_error: history_fetch_state[:local_disabled_error]
+      }
     end
 
     def supports_chat_history_frontier?
@@ -1371,7 +1418,7 @@ module Telegram
         elsif defined?(TD::Types::Unsupported) && response.is_a?(TD::Types::Unsupported) && response.original_type == "messages"
           raw_messages = response.raw.is_a?(Hash) ? response.raw["messages"] : nil
           raw_messages.is_a?(Array) ? raw_messages : nil
-      end
+        end
       return [] unless messages.respond_to?(:map)
 
       messages.map { |message| extract_message_bundle(message, resolve_sender_names:) }.compact
@@ -1412,22 +1459,14 @@ module Telegram
       nil
     end
 
-    def fetch_history_messages_page(chat_id:, from_message_id:, offset:, limit:, retry_wait_seconds: nil)
-      local_response = fetch_td_history_page_with_adaptive_limit(
-        operation: "get_chat_history_local",
+    def fetch_history_messages_page(chat_id:, from_message_id:, offset:, limit:, retry_wait_seconds: nil, history_fetch_state: nil)
+      local_response = fetch_local_history_messages_page(
         chat_id:,
         from_message_id:,
+        offset:,
         limit:,
-        retry_wait_seconds:
-      ) do |effective_limit|
-        @client.get_chat_history(
-          chat_id:,
-          from_message_id:,
-          offset:,
-          limit: effective_limit,
-          only_local: true
-        ).value!
-      end
+        history_fetch_state:
+      )
       return local_response if extract_history_count(local_response).positive?
 
       fetch_td_history_page_with_adaptive_limit(
@@ -1445,6 +1484,38 @@ module Telegram
           only_local: false
         ).value!
       end
+    end
+
+    def fetch_local_history_messages_page(chat_id:, from_message_id:, offset:, limit:, history_fetch_state: nil)
+      return nil unless local_history_fetch_enabled?(history_fetch_state)
+
+      response = @client.get_chat_history(
+        chat_id:,
+        from_message_id:,
+        offset:,
+        limit:,
+        only_local: true
+      ).value!
+      return response if extract_history_count(response).positive?
+
+      disable_local_history_fetch!(
+        history_fetch_state,
+        chat_id:,
+        from_message_id:,
+        reason: "empty"
+      )
+      nil
+    rescue StandardError => e
+      raise unless td_timeout_error?(e)
+
+      disable_local_history_fetch!(
+        history_fetch_state,
+        chat_id:,
+        from_message_id:,
+        reason: "timeout",
+        error_message: e.message
+      )
+      nil
     end
 
     def fetch_search_messages_page(chat_id:, from_message_id:, offset:, limit:, retry_wait_seconds: nil)

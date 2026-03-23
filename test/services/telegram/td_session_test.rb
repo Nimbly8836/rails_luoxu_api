@@ -45,15 +45,18 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     end
   end
 
-  test "history fetch forwards explicit retry wait seconds" do
+  test "history fetch forwards explicit retry wait seconds to remote fallback" do
     session = build_session
     captured_wait_seconds = []
-    response = Object.new
+    local_response = Object.new
+    remote_response = Object.new
     client = Object.new
 
-    response.define_singleton_method(:messages) { [ :local ] }
-    response.define_singleton_method(:value!) { self }
-    client.define_singleton_method(:get_chat_history) { |**| response }
+    local_response.define_singleton_method(:messages) { [] }
+    local_response.define_singleton_method(:value!) { self }
+    remote_response.define_singleton_method(:messages) { [ :remote ] }
+    remote_response.define_singleton_method(:value!) { self }
+    client.define_singleton_method(:get_chat_history) { |**kwargs| kwargs[:only_local] ? local_response : remote_response }
     session.instance_variable_set(:@client, client)
     session.define_singleton_method(:with_td_timeout_retry) do |operation:, chat_id:, from_message_id:, wait_seconds:, limit: nil, &block|
       captured_wait_seconds << [ operation, chat_id, from_message_id, wait_seconds, limit ]
@@ -69,8 +72,8 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
       retry_wait_seconds: 7.5
     )
 
-    assert_same response, result
-    assert_equal [ [ "get_chat_history_local", 123, 456, 7.5, 20 ] ], captured_wait_seconds
+    assert_same remote_response, result
+    assert_equal [ [ "get_chat_history", 123, 456, 7.5, 25 ] ], captured_wait_seconds
   end
 
   test "history fetch prefers local tdlib database before remote" do
@@ -132,6 +135,73 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal [ true, false ], calls.map { |call| call[:only_local] }
   end
 
+  test "history fetch falls back to remote when local tdlib database times out" do
+    session = build_session
+    client = Object.new
+    calls = []
+    remote_response = Object.new
+
+    remote_response.define_singleton_method(:messages) { [ :remote ] }
+    remote_response.define_singleton_method(:value!) { self }
+    client.define_singleton_method(:get_chat_history) do |**kwargs|
+      calls << kwargs
+      raise Timeout::Error, "Timeout error" if kwargs[:only_local]
+
+      remote_response
+    end
+    session.instance_variable_set(:@client, client)
+
+    result = session.send(
+      :fetch_history_messages_page,
+      chat_id: 123,
+      from_message_id: 456,
+      offset: 0,
+      limit: 20,
+      retry_wait_seconds: 7.5
+    )
+
+    assert_same remote_response, result
+    assert_equal 2, calls.size
+    assert_equal [ true, false ], calls.map { |call| call[:only_local] }
+  end
+
+  test "history fetch skips further local tdlib probes after a local miss" do
+    session = build_session
+    client = Object.new
+    calls = []
+    local_response = Object.new
+    remote_response = Object.new
+    history_fetch_state = session.send(:default_history_fetch_state)
+
+    local_response.define_singleton_method(:messages) { [] }
+    local_response.define_singleton_method(:value!) { self }
+    remote_response.define_singleton_method(:messages) { [ :remote ] }
+    remote_response.define_singleton_method(:value!) { self }
+    client.define_singleton_method(:get_chat_history) do |**kwargs|
+      calls << kwargs
+      kwargs[:only_local] ? local_response : remote_response
+    end
+    session.instance_variable_set(:@client, client)
+
+    2.times do
+      result = session.send(
+        :fetch_history_messages_page,
+        chat_id: 123,
+        from_message_id: 456,
+        offset: 0,
+        limit: 20,
+        retry_wait_seconds: 7.5,
+        history_fetch_state:
+      )
+
+      assert_same remote_response, result
+    end
+
+    assert_equal [ true, false, false ], calls.map { |call| call[:only_local] }
+    assert_equal false, history_fetch_state[:local_enabled]
+    assert_equal "empty", history_fetch_state[:local_disabled_reason]
+  end
+
   test "history extraction skips remote sender lookup when disabled" do
     session = build_session
     client = Object.new
@@ -170,17 +240,22 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
 
   test "history fetch reduces batch size after timeout" do
     session = build_session
-    response = Object.new
+    local_response = Object.new
+    remote_response = Object.new
     client = Object.new
     requested_limits = []
 
-    response.define_singleton_method(:messages) { [ :local ] }
-    response.define_singleton_method(:value!) { self }
+    local_response.define_singleton_method(:messages) { [] }
+    local_response.define_singleton_method(:value!) { self }
+    remote_response.define_singleton_method(:messages) { [ :remote ] }
+    remote_response.define_singleton_method(:value!) { self }
     client.define_singleton_method(:get_chat_history) do |**kwargs|
+      return local_response if kwargs[:only_local]
+
       requested_limits << kwargs[:limit]
       raise Timeout::Error, "Timeout error" if requested_limits.one?
 
-      response
+      remote_response
     end
     session.instance_variable_set(:@client, client)
     session.define_singleton_method(:with_td_timeout_retry) do |operation:, chat_id:, from_message_id:, wait_seconds:, limit: nil, &block|
@@ -197,7 +272,7 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
         retry_wait_seconds: 7.5
       )
 
-      assert_same response, result
+      assert_same remote_response, result
       assert_equal [ 50, 25 ], requested_limits
     end
   end
@@ -255,7 +330,7 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
 
     session.define_singleton_method(:fetch_history_messages_page) { |_kwargs = nil, **| :page }
     session.define_singleton_method(:extract_history_count) { |_response| 2 }
-    session.define_singleton_method(:extract_history_messages) { |_response| pages.shift || [] }
+    session.define_singleton_method(:extract_history_messages) { |_response, **| pages.shift || [] }
     session.define_singleton_method(:upsert_usernames_from) { |_bundles| nil }
     session.define_singleton_method(:upsert_messages_bulk) { |messages| messages.size }
     session.define_singleton_method(:sleep) { |_seconds| nil }
@@ -268,7 +343,9 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
         existing_min_td_message_id: 1_000,
         per_chat_limit: nil,
         batch_limit: 200,
-        delay: 0.25
+        delay: 0.25,
+        loaded_frontier: session.send(:default_history_frontier),
+        history_fetch_state: session.send(:default_history_fetch_state)
       )
 
       assert_equal true, result[:attempted]
@@ -328,19 +405,19 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
   test "sync_group_members_for_chats_async enqueues a group member sync job" do
     session = build_session
 
-    result = session.sync_group_members_for_chats_async(chat_ids: [3, 1, 3], reason: "manual")
+    result = session.sync_group_members_for_chats_async(chat_ids: [ 3, 1, 3 ], reason: "manual")
 
     assert_equal true, result[:enqueued]
     assert_equal "enqueued", result[:status]
     assert result[:job_id].present?
-    assert_equal [1, 3], result[:chat_ids]
+    assert_equal [ 1, 3 ], result[:chat_ids]
     assert_equal true, result[:refresh_avatars]
 
     job = enqueued_jobs.last
     assert_equal Telegram::GroupMemberSyncJob, job[:job]
     args = job[:args].first
     assert_equal "test-session", args["account_uuid"]
-    assert_equal [1, 3], args["chat_ids"]
+    assert_equal [ 1, 3 ], args["chat_ids"]
     assert_equal true, args["refresh_avatars"]
     assert_equal "manual", args["reason"]
     assert_equal 0, args["retry_attempt"]
