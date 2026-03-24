@@ -402,48 +402,119 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     end
   end
 
-  test "sync_messages_for_chats_async enqueues a message sync job" do
+  test "incremental history reports continuation when forward page budget is reached" do
     session = build_session
+    page = [
+      {
+        td_message_id: 1_000,
+        message: { td_chat_id: 123, message_id: 100, message_at: Time.current }
+      },
+      {
+        td_message_id: 900,
+        message: { td_chat_id: 123, message_id: 90, message_at: Time.current }
+      }
+    ]
+
+    session.define_singleton_method(:with_operation_lock) { |_kwargs = nil, **, &block| block.call }
+    session.define_singleton_method(:raise_if_disposed!) { nil }
+    session.define_singleton_method(:wait_until_ready!) { nil }
+    session.define_singleton_method(:history_sync_state_lookup) do |_ids|
+      {
+        123 => send(:default_history_sync_state).merge(
+          chat_known_to_account: true,
+          chat_title: "chat-123",
+          existing_min_message_id: 1,
+          existing_max_message_id: 50
+        )
+      }
+    end
+    session.define_singleton_method(:precheck_history_sync_chat) do |chat_id:, **|
+      { chat_title: "chat-#{chat_id}", last_message_id: 1_000, precheck_error: nil }
+    end
+    session.define_singleton_method(:supports_chat_history_frontier?) { false }
+    session.define_singleton_method(:fetch_history_messages_page) { |_kwargs = nil, **| :page }
+    session.define_singleton_method(:extract_history_count) { |_response| 2 }
+    session.define_singleton_method(:describe_response) { |_response| { class: "TestResponse", message_count: 2 } }
+    session.define_singleton_method(:extract_history_messages) { |_response, **| page }
+    session.define_singleton_method(:upsert_usernames_from) { |_bundles| nil }
+    session.define_singleton_method(:upsert_messages_bulk) { |messages| messages.size }
+    session.define_singleton_method(:persist_chat_history_frontier!) { |**| nil }
+    session.define_singleton_method(:sleep) { |_seconds| nil }
+
+    result = session.sync_messages_for_chats(
+      chat_ids: [ 123 ],
+      limit_per_chat: nil,
+      wait_seconds: nil,
+      forward_max_pages: 1
+    )
+
+    assert_equal 1, result[:details].size
+    detail = result[:details].first
+    assert_equal "incremental", detail[:mode]
+    assert_equal true, detail[:continuation_required]
+    assert_equal "forward_page_budget_reached", detail[:continuation_reason]
+  end
+
+  test "sync_messages_for_chats_async schedules local message sync" do
+    session = build_session
+    captured = nil
+
+    session.define_singleton_method(:schedule_message_sync_locally) do |**kwargs|
+      captured = kwargs
+      {
+        enqueued: true,
+        status: "scheduled",
+        reason: kwargs[:reason].to_s,
+        chat_ids: kwargs[:chat_ids],
+        watched_chat_ids: kwargs[:use_watched_chat_ids],
+        wait_seconds: 5.0,
+        limit_per_chat: kwargs[:limit_per_chat]
+      }
+    end
 
     result = session.sync_messages_for_chats_async(chat_ids: [ 3, 1, 3 ], limit_per_chat: 20, reason: "manual")
 
     assert_equal true, result[:enqueued]
-    assert_equal "enqueued", result[:status]
-    assert result[:job_id].present?
+    assert_equal "scheduled", result[:status]
     assert_equal [ 1, 3 ], result[:chat_ids]
     assert_equal false, result[:watched_chat_ids]
-    assert_equal 5.0, result[:wait_seconds]
     assert_equal 20, result[:limit_per_chat]
-    assert_equal 1, enqueued_jobs.size
-
-    job = enqueued_jobs.last
-    assert_equal Telegram::MessageSyncJob, job[:job]
-    args = job[:args].first
-    assert_equal "test-session", args["account_uuid"]
-    assert_equal [ 1, 3 ], args["chat_ids"]
-    assert_equal false, args["use_watched_chat_ids"]
-    assert_equal 20, args["limit_per_chat"]
-    assert_equal 5.0, args["wait_seconds"]
-    assert_equal "manual", args["reason"]
-    assert_equal 0, args["retry_attempt"]
+    assert_equal 5.0, result[:wait_seconds]
+    assert_equal 0, enqueued_jobs.size
+    assert_equal [ 1, 3 ], captured[:chat_ids]
+    assert_equal false, captured[:use_watched_chat_ids]
+    assert_equal 20, captured[:limit_per_chat]
+    assert_nil captured[:wait_seconds]
+    assert_equal "manual", captured[:reason]
   end
 
-  test "sync_messages_for_chats_async enqueues watched chat sync job" do
+  test "sync_messages_for_chats_async schedules watched chat sync" do
     session = build_session
+    captured = nil
+
+    session.define_singleton_method(:schedule_message_sync_locally) do |**kwargs|
+      captured = kwargs
+      {
+        enqueued: true,
+        status: "scheduled",
+        reason: kwargs[:reason].to_s,
+        chat_ids: [ 4, 9 ],
+        watched_chat_ids: kwargs[:use_watched_chat_ids],
+        wait_seconds: 5.0,
+        limit_per_chat: kwargs[:limit_per_chat]
+      }
+    end
+
     result = session.sync_messages_for_watched_chats_async(reason: "boot")
 
     assert_equal true, result[:enqueued]
-    assert_equal "enqueued", result[:status]
-    assert_equal [], result[:chat_ids]
+    assert_equal "scheduled", result[:status]
+    assert_equal [ 4, 9 ], result[:chat_ids]
     assert_equal true, result[:watched_chat_ids]
-    assert_equal 1, enqueued_jobs.size
-
-    job = enqueued_jobs.last
-    assert_equal Telegram::MessageSyncJob, job[:job]
-    args = job[:args].first
-    assert_equal true, args["use_watched_chat_ids"]
-    assert_equal [], args["chat_ids"]
-    assert_equal "boot", args["reason"]
+    assert_equal 0, enqueued_jobs.size
+    assert_equal true, captured[:use_watched_chat_ids]
+    assert_nil captured[:chat_ids]
+    assert_equal "boot", captured[:reason]
   end
 
   test "sync_group_members_for_chats_async enqueues a group member sync job" do
@@ -542,6 +613,16 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
       session.instance_variable_set(:@mutex, Mutex.new)
       session.instance_variable_set(:@operation_mutex, Mutex.new)
       session.instance_variable_set(:@sender_name_cache, {})
+      session.instance_variable_set(:@message_link_cache, {})
+      session.instance_variable_set(:@opened_chat_ids, {})
+      session.instance_variable_set(:@watched_chat_ids_cache, {})
+      session.instance_variable_set(:@watched_chat_ids_cache_loaded_at, 0.0)
+      session.instance_variable_set(:@message_sync_scheduler_mutex, Mutex.new)
+      session.instance_variable_set(:@message_sync_scheduler_cv, ConditionVariable.new)
+      session.instance_variable_set(:@scheduled_message_syncs, {})
+      session.instance_variable_set(:@message_sync_schedule_sequence, 0)
+      session.instance_variable_set(:@message_sync_scheduler_thread, nil)
+      session.instance_variable_set(:@disposed, false)
     end
   end
 

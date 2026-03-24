@@ -7,6 +7,11 @@ module Telegram
     class InvalidStateError < StandardError; end
     WATCHED_CHAT_IDS_CACHE_TTL_SECONDS = [ ENV.fetch("TELEGRAM_WATCHED_CHAT_IDS_CACHE_TTL_SECONDS", "5").to_f, 0.5 ].max
     MESSAGE_LINK_CACHE_TTL_SECONDS = [ ENV.fetch("TELEGRAM_MESSAGE_LINK_CACHE_TTL_SECONDS", "600").to_f, 1.0 ].max
+    MESSAGE_SYNC_PRIMARY_PRIORITY = 10
+    MESSAGE_SYNC_BOOT_PRIORITY = 20
+    MESSAGE_SYNC_RETRY_PRIORITY = 30
+    MESSAGE_SYNC_FORWARD_CONTINUATION_PRIORITY = 40
+    MESSAGE_SYNC_BACKFILL_CONTINUATION_PRIORITY = 50
 
     attr_reader :id
 
@@ -27,6 +32,11 @@ module Telegram
       @watched_chat_ids_cache = {}
       @watched_chat_ids_cache_loaded_at = 0.0
       @boot_recovery_sync_enqueued = false
+      @message_sync_scheduler_mutex = Mutex.new
+      @message_sync_scheduler_cv = ConditionVariable.new
+      @scheduled_message_syncs = {}
+      @message_sync_schedule_sequence = 0
+      @message_sync_scheduler_thread = nil
 
       @client = TD::Client.new(**client_config(account))
       subscribe_updates
@@ -52,11 +62,11 @@ module Telegram
     end
 
     def sync_messages_for_watched_chats_async(reason: "manual")
-      enqueue_message_sync_job(use_watched_chat_ids: true, reason:)
+      schedule_message_sync_async(use_watched_chat_ids: true, reason:)
     end
 
     def sync_messages_for_chats_async(chat_ids:, limit_per_chat: nil, wait_seconds: nil, reason: "manual")
-      enqueue_message_sync_job(
+      schedule_message_sync_async(
         chat_ids:,
         limit_per_chat:,
         wait_seconds:,
@@ -216,7 +226,7 @@ module Telegram
       raise InvalidStateError, "Session state is #{state}"
     end
 
-    def sync_messages_for_chats(chat_ids:, limit_per_chat: nil, wait_seconds: nil)
+    def sync_messages_for_chats(chat_ids:, limit_per_chat: nil, wait_seconds: nil, forward_max_pages: nil, backfill_max_pages: nil)
       with_operation_lock do
         raise_if_disposed!
         wait_until_ready!
@@ -357,13 +367,14 @@ module Telegram
               break if oldest_td_message_id <= 0
               break if reached_existing_boundary
 
-              if history_seed_page_budget_reached?(
+              if history_forward_page_budget_reached?(
                 history_seed_required:,
                 per_chat_limit:,
-                batches:
+                batches:,
+                forward_max_pages:
               )
                 continuation_required = true
-                continuation_reason = "seed_page_budget_reached"
+                continuation_reason = history_seed_required ? "seed_page_budget_reached" : "forward_page_budget_reached"
                 break
               end
 
@@ -388,7 +399,8 @@ module Telegram
               batch_limit:,
               delay:,
               loaded_frontier:,
-              history_fetch_state:
+              history_fetch_state:,
+              max_pages: backfill_max_pages
             )
             result[:upserted] += backfill[:upserted]
             chat_upserted += backfill[:upserted]
@@ -460,7 +472,7 @@ module Telegram
       end
     end
 
-    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, existing_min_td_message_id:, per_chat_limit:, batch_limit:, delay:, loaded_frontier:, history_fetch_state:)
+    def backfill_older_messages_for_chat(chat_id:, existing_min_message_id:, existing_min_td_message_id:, per_chat_limit:, batch_limit:, delay:, loaded_frontier:, history_fetch_state:, max_pages: nil)
       result = default_backfill_result(
         existing_min_message_id:,
         existing_min_td_message_id:
@@ -474,7 +486,7 @@ module Telegram
       result[:attempted] = true
       seen_message_ids = {}
       stalled_pages = 0
-      max_pages = ENV.fetch("TELEGRAM_MESSAGE_SYNC_BACKFILL_MAX_PAGES", "250").to_i.clamp(1, 1_000)
+      max_pages = normalize_history_page_budget(max_pages, default: configured_backfill_max_pages)
       pages = 0
       from_message_id = min_td_message_id.positive? ? min_td_message_id : 0
 
@@ -567,11 +579,18 @@ module Telegram
       true
     end
 
-    def history_seed_page_budget_reached?(history_seed_required:, per_chat_limit:, batches:)
-      return false unless history_seed_required
+    def history_forward_page_budget_reached?(history_seed_required:, per_chat_limit:, batches:, forward_max_pages: nil)
       return false if per_chat_limit.present?
 
-      batches.to_i >= initial_history_seed_max_pages
+      budget =
+        if forward_max_pages.present?
+          forward_max_pages
+        elsif history_seed_required
+          initial_history_seed_max_pages
+        end
+      return false if budget.blank?
+
+      batches.to_i >= normalize_history_page_budget(budget, default: initial_history_seed_max_pages)
     end
 
     def dispose
@@ -583,6 +602,7 @@ module Telegram
       end
 
       if should_dispose
+        stop_message_sync_scheduler!
         @client.dispose
         persist_account(state: "closed", last_state_at: Time.current)
       end
@@ -624,6 +644,287 @@ module Telegram
     end
 
     private
+
+    def schedule_message_sync_async(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:)
+      if in_process_message_sync?
+        schedule_message_sync_locally(
+          chat_ids:,
+          use_watched_chat_ids:,
+          limit_per_chat:,
+          wait_seconds:,
+          reason:
+        )
+      else
+        enqueue_message_sync_job(
+          chat_ids:,
+          use_watched_chat_ids:,
+          limit_per_chat:,
+          wait_seconds:,
+          reason:
+        )
+      end
+    end
+
+    def schedule_message_sync_locally(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:)
+      raise_if_disposed!
+
+      ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq.sort
+      ids |= watched_chat_ids if use_watched_chat_ids
+      return { enqueued: false, status: "skipped", reason: "no_chat_ids" } if ids.empty?
+
+      normalized_limit = normalize_limit_per_chat(limit_per_chat)
+      normalized_wait = normalize_wait_seconds(wait_seconds, default: default_message_sync_wait_seconds)
+      ensure_message_sync_scheduler_started!
+      schedule_local_message_sync_entries(
+        chat_ids: ids,
+        limit_per_chat: normalized_limit,
+        wait_seconds: normalized_wait,
+        reason: reason.to_s,
+        retry_attempt: 0,
+        next_run_at: monotonic_now
+      )
+
+      {
+        enqueued: true,
+        status: "scheduled",
+        reason: reason.to_s,
+        chat_ids: ids,
+        watched_chat_ids: use_watched_chat_ids,
+        wait_seconds: normalized_wait,
+        limit_per_chat: normalized_limit
+      }
+    end
+
+    def ensure_message_sync_scheduler_started!
+      return unless in_process_message_sync?
+
+      thread = nil
+      @message_sync_scheduler_mutex.synchronize do
+        thread = @message_sync_scheduler_thread
+        next if thread&.alive?
+
+        @message_sync_scheduler_thread = Thread.new do
+          Thread.current.report_on_exception = false if Thread.current.respond_to?(:report_on_exception=)
+          message_sync_scheduler_loop
+        end
+      end
+    end
+
+    def stop_message_sync_scheduler!
+      thread = @message_sync_scheduler_mutex.synchronize do
+        @scheduled_message_syncs.clear
+        @message_sync_scheduler_cv.broadcast
+        current_thread = @message_sync_scheduler_thread
+        @message_sync_scheduler_thread = nil
+        current_thread
+      end
+      thread&.join(1)
+    rescue StandardError => e
+      Rails.logger.warn("Failed stopping message sync scheduler for account #{@id}: #{e.message}")
+    end
+
+    def message_sync_scheduler_loop
+      loop do
+        break if disposed?
+
+        entry = next_message_sync_entry
+        break if entry.nil?
+
+        process_scheduled_message_sync(entry)
+      end
+    rescue StandardError => e
+      Rails.logger.error("Message sync scheduler crashed for account #{@id}: #{e.class}: #{e.message}")
+      retry unless disposed?
+    end
+
+    def next_message_sync_entry
+      loop do
+        entry = nil
+        wait_seconds = nil
+
+        @message_sync_scheduler_mutex.synchronize do
+          return nil if disposed?
+
+          now = monotonic_now
+          ready_entries = @scheduled_message_syncs.values.select { |candidate| candidate[:next_run_at].to_f <= now }
+          if ready_entries.any?
+            entry = ready_entries.min_by do |candidate|
+              [
+                candidate[:priority].to_i,
+                candidate[:sequence].to_i,
+                candidate[:chat_id].to_i
+              ]
+            end
+            @scheduled_message_syncs.delete(entry[:chat_id])
+          else
+            next_run_at = @scheduled_message_syncs.values.map { |candidate| candidate[:next_run_at].to_f }.min
+            wait_seconds = if next_run_at
+                             [ next_run_at - now, 0.05 ].max
+            else
+                             message_sync_scheduler_idle_wait_seconds
+            end
+            @message_sync_scheduler_cv.wait(@message_sync_scheduler_mutex, wait_seconds)
+          end
+        end
+
+        return entry&.dup if entry
+      end
+    end
+
+    def process_scheduled_message_sync(entry)
+      chat_id = entry[:chat_id].to_i
+      sync = sync_messages_for_chats(
+        chat_ids: [ chat_id ],
+        limit_per_chat: entry[:limit_per_chat],
+        wait_seconds: entry[:wait_seconds],
+        forward_max_pages: scheduler_forward_max_pages,
+        backfill_max_pages: scheduler_backfill_max_pages
+      )
+      Rails.logger.info(
+        "In-process message sync for account #{@id} chat=#{chat_id} reason=#{entry[:reason]} " \
+        "retry_attempt=#{entry[:retry_attempt]}: #{sync.inspect}"
+      )
+      reschedule_message_sync_from_result(entry, sync)
+    rescue StandardError => e
+      Rails.logger.warn(
+        "In-process message sync failed for account #{@id} chat=#{chat_id} reason=#{entry[:reason]} " \
+        "retry_attempt=#{entry[:retry_attempt]} error=#{e.message}"
+      )
+      reschedule_message_sync_after_failure(entry, e)
+    end
+
+    def reschedule_message_sync_from_result(entry, sync)
+      detail = Array(sync[:details] || sync["details"]).find do |row|
+        row_chat_id = row[:chat_id] || row["chat_id"]
+        row_chat_id.to_i == entry[:chat_id].to_i
+      end || {}
+      return if detail[:error].present? || detail["error"].present?
+
+      continuation_required = ActiveModel::Type::Boolean.new.cast(
+        detail[:continuation_required] || detail["continuation_required"]
+      )
+      return unless continuation_required
+
+      continuation_reason = detail[:continuation_reason] || detail["continuation_reason"]
+      next_reason = entry[:reason].to_s.include?(":continue") ? entry[:reason].to_s : "#{entry[:reason]}:continue"
+      schedule_local_message_sync_entries(
+        chat_ids: [ entry[:chat_id] ],
+        limit_per_chat: entry[:limit_per_chat],
+        wait_seconds: entry[:wait_seconds],
+        reason: next_reason,
+        retry_attempt: 0,
+        continuation_reason: continuation_reason,
+        next_run_at: monotonic_now + scheduler_continuation_delay_seconds
+      )
+    end
+
+    def reschedule_message_sync_after_failure(entry, error)
+      retry_attempt = entry[:retry_attempt].to_i + 1
+      if retry_attempt > scheduler_max_retry_attempts
+        Rails.logger.error(
+          "In-process message sync exhausted retries for account #{@id} chat=#{entry[:chat_id]} " \
+          "reason=#{entry[:reason]} error=#{error.message}"
+        )
+        return
+      end
+
+      schedule_local_message_sync_entries(
+        chat_ids: [ entry[:chat_id] ],
+        limit_per_chat: entry[:limit_per_chat],
+        wait_seconds: scheduler_next_wait_seconds_for(entry[:wait_seconds]),
+        reason: "#{entry[:reason]}:retry#{retry_attempt}",
+        retry_attempt: retry_attempt,
+        next_run_at: monotonic_now + scheduler_retry_delay_seconds_for(retry_attempt)
+      )
+    end
+
+    def schedule_local_message_sync_entries(chat_ids:, limit_per_chat:, wait_seconds:, reason:, retry_attempt:, next_run_at:, continuation_reason: nil)
+      ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq.sort
+      return [] if ids.empty?
+
+      @message_sync_scheduler_mutex.synchronize do
+        ids.each do |chat_id|
+          existing = @scheduled_message_syncs[chat_id]
+          @message_sync_schedule_sequence += 1
+          sequence = existing ? existing[:sequence].to_i : @message_sync_schedule_sequence
+          normalized_wait_seconds = wait_seconds.nil? ? default_message_sync_wait_seconds : normalize_wait_seconds(wait_seconds, default: default_message_sync_wait_seconds)
+          next_priority = scheduler_priority_for(reason.to_s, continuation_reason: continuation_reason, retry_attempt: retry_attempt)
+          preserve_existing = existing &&
+            existing[:priority].to_i <= next_priority &&
+            existing[:next_run_at].to_f <= next_run_at.to_f
+          @scheduled_message_syncs[chat_id] = {
+            chat_id: chat_id,
+            limit_per_chat: limit_per_chat.nil? ? existing&.dig(:limit_per_chat) : limit_per_chat,
+            wait_seconds: preserve_existing ? existing[:wait_seconds] : normalized_wait_seconds,
+            reason: preserve_existing ? existing[:reason].to_s : reason.to_s,
+            retry_attempt: preserve_existing ? existing[:retry_attempt].to_i : retry_attempt.to_i,
+            continuation_reason: preserve_existing ? existing[:continuation_reason] : continuation_reason,
+            priority: existing ? [ existing[:priority].to_i, next_priority ].min : next_priority,
+            next_run_at: existing ? [ existing[:next_run_at].to_f, next_run_at.to_f ].min : next_run_at.to_f,
+            sequence: sequence
+          }
+        end
+        @message_sync_scheduler_cv.broadcast
+      end
+
+      ids
+    end
+
+    def in_process_message_sync?
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_MODE", "in_process") != "job"
+    end
+
+    def scheduler_priority_for(reason, continuation_reason:, retry_attempt:)
+      return MESSAGE_SYNC_RETRY_PRIORITY if retry_attempt.to_i.positive? || reason.to_s.include?(":retry")
+
+      case continuation_reason.to_s
+      when "backfill_page_budget_reached" then MESSAGE_SYNC_BACKFILL_CONTINUATION_PRIORITY
+      when "seed_page_budget_reached", "forward_page_budget_reached" then MESSAGE_SYNC_FORWARD_CONTINUATION_PRIORITY
+      else
+        reason.to_s == "boot" ? MESSAGE_SYNC_BOOT_PRIORITY : MESSAGE_SYNC_PRIMARY_PRIORITY
+      end
+    end
+
+    def disposed?
+      @mutex.synchronize { @disposed }
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def message_sync_scheduler_idle_wait_seconds
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_SCHEDULER_IDLE_WAIT_SECONDS", "0.5").to_f.clamp(0.05, 60.0)
+    end
+
+    def scheduler_forward_max_pages
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_SCHEDULER_FORWARD_MAX_PAGES", "2").to_i.clamp(1, 100)
+    end
+
+    def scheduler_backfill_max_pages
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_SCHEDULER_BACKFILL_MAX_PAGES", "1").to_i.clamp(1, 100)
+    end
+
+    def scheduler_continuation_delay_seconds
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_CONTINUATION_WAIT_SECONDS", "1").to_f.clamp(0.0, 60.0)
+    end
+
+    def scheduler_retry_delay_seconds_for(retry_attempt)
+      base_wait = [ ENV.fetch("TELEGRAM_MESSAGE_SYNC_JOB_RETRY_BASE_WAIT_SECONDS", "60").to_i, 1 ].max
+      max_wait = ENV.fetch("TELEGRAM_MESSAGE_SYNC_JOB_RETRY_MAX_WAIT_SECONDS", "1800").to_i
+      delay_seconds = base_wait * (2**[ retry_attempt.to_i - 1, 0 ].max)
+      [ delay_seconds, max_wait.positive? ? max_wait : delay_seconds ].min
+    end
+
+    def scheduler_next_wait_seconds_for(current_wait_seconds)
+      base_wait = current_wait_seconds.to_f.positive? ? current_wait_seconds.to_f : default_message_sync_wait_seconds
+      max_wait = ENV.fetch("TELEGRAM_MESSAGE_SYNC_JOB_MAX_WAIT_SECONDS", "60").to_f
+      [ base_wait * 2, max_wait.positive? ? max_wait : base_wait * 2 ].min
+    end
+
+    def scheduler_max_retry_attempts
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_JOB_RETRY_ATTEMPTS", "12").to_i.clamp(1, 100)
+    end
 
     def enqueue_message_sync_job(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:)
       ids = Array(chat_ids).map(&:to_i).uniq.sort
@@ -1740,6 +2041,10 @@ module Telegram
       ENV.fetch("TELEGRAM_MESSAGE_SYNC_SEED_MAX_PAGES", "5").to_i.clamp(1, 1_000)
     end
 
+    def configured_backfill_max_pages
+      ENV.fetch("TELEGRAM_MESSAGE_SYNC_BACKFILL_MAX_PAGES", "250").to_i.clamp(1, 1_000)
+    end
+
     def configured_history_batch_limit
       ENV.fetch("TELEGRAM_MESSAGE_SYNC_BATCH_LIMIT", "100").to_i.clamp(1, 500)
     end
@@ -1774,6 +2079,11 @@ module Telegram
     def normalize_wait_seconds(wait_seconds, default:)
       seconds = wait_seconds.nil? ? default.to_f : wait_seconds.to_f
       seconds.negative? ? 0.0 : seconds
+    end
+
+    def normalize_history_page_budget(value, default:)
+      budget = value.present? ? value.to_i : default.to_i
+      budget.clamp(1, 1_000)
     end
 
     def timeout_retry_wait_seconds(base_retry_wait_seconds, attempt)
