@@ -18,6 +18,9 @@ class AddHistoryAndPollTablesForTelegramMessages < ActiveRecord::Migration[8.0]
       t.jsonb :payload, null: false, default: {}
       t.datetime :created_at, null: false
     end
+    add_check_constraint :telegram_message_histories,
+                         "event_type IN ('edited', 'deleted')",
+                         name: "check_telegram_message_histories_event_type"
 
     add_index :telegram_message_histories,
               [ :telegram_account_id, :td_chat_id, :message_id, :event_at ],

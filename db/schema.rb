@@ -164,6 +164,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_04_12_090000) do
     t.datetime "created_at", null: false
     t.index ["event_type", "event_at"], name: "index_telegram_message_histories_on_event_type_and_event_at"
     t.index ["telegram_account_id", "td_chat_id", "message_id", "event_at"], name: "index_telegram_message_histories_on_account_chat_message_time"
+    t.check_constraint "event_type IN ('edited', 'deleted')", name: "check_telegram_message_histories_event_type"
   end
 
   create_table "telegram_polls", force: :cascade do |t|
