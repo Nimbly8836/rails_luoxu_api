@@ -12,7 +12,7 @@
 
 ## 2. 范围与非目标
 ### 范围
-- 消息变更事件：`new`、`edited`、`deleted`、`poll_updated`。
+- 消息变更事件：仅 `edited`、`deleted`。
 - 消息当前态：支持 `deleted_at` 软删除，默认查询过滤已删除消息。
 - 投票：展示题目、选项票数、总票数、匿名/多选属性、当前账号是否投票与已选项。
 - 存储维度：按 `telegram_account_id` 独立存储每个账号看到的投票状态。
@@ -52,7 +52,7 @@
 - `td_chat_id: bigint`
 - `message_id: bigint`
 - `td_message_id: bigint`（可空，兼容历史）
-- `event_type: string`（`new|edited|deleted|poll_updated`）
+- `event_type: string`（`edited|deleted`）
 - `event_at: datetime`
 - `payload: jsonb`（差异内容、上下文）
 - `created_at: datetime`
@@ -116,7 +116,7 @@
 ### 5.1 `updateNewMessage`
 - 继续 upsert 到 `telegram_messages`。
 - 若消息内容为 poll，同步 upsert 投票主体与选项，并更新账号投票快照。
-- 记录 `telegram_message_events(event_type='new')`（可审计完整链路）。
+- 不写 `telegram_message_events`。
 
 ### 5.2 `updateMessageContent`（编辑）
 - 更新 `telegram_messages` 当前态字段（`text` 等）并写 `edited_at`。
@@ -132,7 +132,7 @@
 - upsert `telegram_polls` 当前状态。
 - upsert `telegram_poll_options`（票数、是否被该账号选中）。
 - upsert `telegram_account_poll_states`（该账号是否投票、已选项、快照时间）。
-- 写 `telegram_message_events(event_type='poll_updated')`，payload 记录最小变化信息。
+- 不写 `telegram_message_events`。
 
 ## 6. 查询与 API 行为
 目标接口：`Api::MeController#search_messages`
@@ -150,7 +150,7 @@
 
 ## 7. 一致性与异常处理
 - 更新顺序：先写当前态（`telegram_messages` / poll 表），再写事件日志。
-- 事件写入失败：记录错误并重试当前批次，避免长期“有当前态无历史”。
+- 对 `edited/deleted` 事件：事件写入失败时记录错误并重试当前批次，避免长期“有当前态无历史”。
 - 幂等：使用 upsert 和幂等键（账号+chat+message+事件特征）避免重复消费导致脏数据。
 - 删除后收到编辑事件：不清空 `deleted_at`，仅记录事件（已删除消息不复活）。
 
@@ -160,7 +160,7 @@
 新增用例：
 - `updateMessageContent`：更新当前消息 + 写 `edited` 事件。
 - `updateDeleteMessages`：软删除 + 写 `deleted` 事件。
-- `updateMessagePoll`：upsert poll 三表 + 写 `poll_updated` 事件。
+- `updateMessagePoll`：upsert poll 三表，不写事件日志。
 
 ### 8.2 API 测试
 新增/扩展控制器测试：
@@ -191,3 +191,4 @@
 - `telegram_messages` 体现最新态，删除后为软删除。
 - `search_messages` 可直接展示投票题目、选项票数、总票数、匿名/多选、当前账号投票状态。
 - 同一条消息在不同 `telegram_account` 下的投票快照可独立存储与读取。
+- 历史事件表不包含 `new` 与 `poll_updated` 事件，仅包含 `edited` 与 `deleted`。
