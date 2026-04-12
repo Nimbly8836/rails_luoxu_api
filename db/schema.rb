@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_03_23_150746) do
+ActiveRecord::Schema[8.0].define(version: 2026_04_12_090000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pgroonga"
@@ -139,10 +139,13 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_23_150746) do
     t.bigint "td_message_id", null: false
     t.bigint "td_sender_id"
     t.datetime "message_at", null: false
+    t.datetime "deleted_at"
+    t.datetime "edited_at"
     t.text "text"
     t.string "sender_name"
     t.bigint "message_id", null: false
     t.index ["message_at"], name: "index_telegram_messages_on_message_at"
+    t.index ["deleted_at"], name: "index_telegram_messages_on_deleted_at"
     t.index ["td_chat_id", "message_id"], name: "index_telegram_messages_on_td_chat_id_and_message_id"
     t.index ["td_chat_id"], name: "index_telegram_messages_on_td_chat_id"
     t.index ["telegram_account_id", "td_chat_id", "td_message_id"], name: "index_telegram_messages_on_account_chat_message", unique: true
@@ -150,9 +153,69 @@ ActiveRecord::Schema[8.0].define(version: 2026_03_23_150746) do
     t.index ["text"], name: "message_idx", using: :pgroonga
   end
 
+  create_table "telegram_message_histories", force: :cascade do |t|
+    t.bigint "telegram_account_id", null: false
+    t.bigint "td_chat_id", null: false
+    t.bigint "message_id", null: false
+    t.bigint "td_message_id"
+    t.string "event_type", null: false
+    t.datetime "event_at", null: false
+    t.jsonb "payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.index ["event_type", "event_at"], name: "index_telegram_message_histories_on_event_type_and_event_at"
+    t.index ["telegram_account_id", "td_chat_id", "message_id", "event_at"], name: "index_telegram_message_histories_on_account_chat_message_time"
+  end
+
+  create_table "telegram_polls", force: :cascade do |t|
+    t.bigint "telegram_account_id", null: false
+    t.bigint "td_chat_id", null: false
+    t.bigint "message_id", null: false
+    t.string "poll_id", null: false
+    t.text "question"
+    t.boolean "is_anonymous", default: true, null: false
+    t.boolean "allows_multiple_answers", default: false, null: false
+    t.integer "total_voter_count", default: 0, null: false
+    t.boolean "is_closed", default: false, null: false
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["poll_id"], name: "index_telegram_polls_on_poll_id"
+    t.index ["telegram_account_id", "td_chat_id", "message_id"], name: "index_telegram_polls_on_account_chat_message", unique: true
+  end
+
+  create_table "telegram_poll_options", force: :cascade do |t|
+    t.bigint "telegram_poll_id", null: false
+    t.integer "option_index", null: false
+    t.text "text"
+    t.integer "voter_count", default: 0, null: false
+    t.boolean "is_chosen", default: false, null: false
+    t.boolean "is_correct"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["telegram_poll_id", "option_index"], name: "index_telegram_poll_options_on_poll_and_option", unique: true
+  end
+
+  create_table "telegram_account_poll_states", force: :cascade do |t|
+    t.bigint "telegram_account_id", null: false
+    t.bigint "td_chat_id", null: false
+    t.bigint "message_id", null: false
+    t.string "poll_id", null: false
+    t.jsonb "chosen_option_indexes", default: [], null: false
+    t.boolean "has_voted", default: false, null: false
+    t.datetime "snapshot_at", null: false
+    t.jsonb "raw_payload", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["telegram_account_id", "td_chat_id", "message_id"], name: "index_telegram_account_poll_states_on_account_chat_message", unique: true
+  end
+
   add_foreign_key "system_user_chat_accesses", "system_users"
   add_foreign_key "telegram_account_profiles", "telegram_accounts"
   add_foreign_key "telegram_account_watch_targets", "telegram_accounts"
   add_foreign_key "telegram_chats", "telegram_accounts"
+  add_foreign_key "telegram_account_poll_states", "telegram_accounts"
+  add_foreign_key "telegram_message_histories", "telegram_accounts"
   add_foreign_key "telegram_messages", "telegram_accounts"
+  add_foreign_key "telegram_poll_options", "telegram_polls"
+  add_foreign_key "telegram_polls", "telegram_accounts"
 end
