@@ -814,6 +814,172 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal 0, TelegramMessageHistory.where(event_type: "deleted").count
   end
 
+  test "unsupported updateMessagePoll upserts poll snapshot rows without writing message history" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    first_update = Struct.new(:original_type, :raw).new(
+      "updateMessagePoll",
+      {
+        "chat_id" => -100123,
+        "message_id" => 300_000_000_456,
+        "poll" => {
+          "id" => "poll_123",
+          "question" => "Pick a letter",
+          "is_anonymous" => false,
+          "allows_multiple_answers" => true,
+          "total_voter_count" => 7,
+          "is_closed" => false,
+          "options" => [
+            {
+              "text" => "A",
+              "voter_count" => 3,
+              "is_chosen" => false,
+              "is_correct" => nil
+            },
+            {
+              "text" => "B",
+              "voter_count" => 4,
+              "is_chosen" => true,
+              "is_correct" => nil
+            }
+          ]
+        }
+      }
+    )
+
+    assert_difference("TelegramPoll.count", 1) do
+      assert_difference("TelegramPollOption.count", 2) do
+        assert_difference("TelegramAccountPollState.count", 1) do
+          assert_no_difference("TelegramMessageHistory.count") do
+            session.send(:handle_unsupported_update, first_update)
+          end
+        end
+      end
+    end
+
+    poll = TelegramPoll.find_by!(telegram_account_id: account.id, td_chat_id: -100123, message_id: 456)
+    assert_equal "poll_123", poll.poll_id
+    assert_equal "Pick a letter", poll.question
+    assert_equal false, poll.is_anonymous
+    assert_equal true, poll.allows_multiple_answers
+    assert_equal 7, poll.total_voter_count
+    assert_equal false, poll.is_closed
+    assert_equal "poll_123", poll.raw_payload["id"]
+
+    options = poll.telegram_poll_options.order(:option_index).to_a
+    assert_equal 2, options.size
+    assert_equal [ "A", "B" ], options.map(&:text)
+    assert_equal [ 3, 4 ], options.map(&:voter_count)
+    assert_equal [ false, true ], options.map(&:is_chosen)
+
+    state = TelegramAccountPollState.find_by!(telegram_account_id: account.id, td_chat_id: -100123, message_id: 456)
+    assert_equal "poll_123", state.poll_id
+    assert_equal true, state.has_voted
+    assert_equal [ 1 ], state.chosen_option_indexes
+    assert_equal "poll_123", state.raw_payload.dig("poll", "id")
+    assert_not_nil state.snapshot_at
+
+    second_update = Struct.new(:original_type, :raw).new(
+      "updateMessagePoll",
+      {
+        "chat_id" => -100123,
+        "message_id" => 300_000_000_456,
+        "poll" => {
+          "id" => "poll_123",
+          "question" => "Pick a better letter",
+          "is_anonymous" => true,
+          "allows_multiple_answers" => false,
+          "total_voter_count" => 9,
+          "is_closed" => true,
+          "options" => [
+            {
+              "text" => "A",
+              "voter_count" => 5,
+              "is_chosen" => true,
+              "is_correct" => false
+            },
+            {
+              "text" => "B",
+              "voter_count" => 4,
+              "is_chosen" => false,
+              "is_correct" => true
+            }
+          ]
+        }
+      }
+    )
+
+    assert_no_difference("TelegramPoll.count") do
+      assert_no_difference("TelegramPollOption.count") do
+        assert_no_difference("TelegramAccountPollState.count") do
+          assert_no_difference("TelegramMessageHistory.count") do
+            session.send(:handle_unsupported_update, second_update)
+          end
+        end
+      end
+    end
+
+    poll.reload
+    assert_equal "Pick a better letter", poll.question
+    assert_equal true, poll.is_anonymous
+    assert_equal false, poll.allows_multiple_answers
+    assert_equal 9, poll.total_voter_count
+    assert_equal true, poll.is_closed
+
+    options = poll.telegram_poll_options.order(:option_index).to_a
+    assert_equal [ 5, 4 ], options.map(&:voter_count)
+    assert_equal [ true, false ], options.map(&:is_chosen)
+    assert_equal [ false, true ], options.map(&:is_correct)
+
+    state.reload
+    assert_equal true, state.has_voted
+    assert_equal [ 0 ], state.chosen_option_indexes
+    assert_equal "Pick a better letter", state.raw_payload.dig("poll", "question")
+  end
+
+  test "unsupported updateMessagePoll safely ignores invalid payloads" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    invalid_updates = [
+      Struct.new(:original_type, :raw).new("updateMessagePoll", nil),
+      Struct.new(:original_type, :raw).new(
+        "updateMessagePoll",
+        {
+          "chat_id" => -100123,
+          "message_id" => 300_000_000_456
+        }
+      ),
+      Struct.new(:original_type, :raw).new(
+        "updateMessagePoll",
+        {
+          "chat_id" => -100123,
+          "message_id" => 0,
+          "poll" => { "id" => "poll_123" }
+        }
+      ),
+      Struct.new(:original_type, :raw).new(
+        "updateMessagePoll",
+        {
+          "chat_id" => -100123,
+          "message_id" => 300_000_000_456,
+          "poll" => { "question" => "missing id" }
+        }
+      )
+    ]
+
+    assert_no_difference("TelegramPoll.count") do
+      assert_no_difference("TelegramPollOption.count") do
+        assert_no_difference("TelegramAccountPollState.count") do
+          assert_no_difference("TelegramMessageHistory.count") do
+            invalid_updates.each do |update|
+              session.send(:handle_unsupported_update, update)
+            end
+          end
+        end
+      end
+    end
+  end
+
   private
 
   def build_session(account_id: 1)

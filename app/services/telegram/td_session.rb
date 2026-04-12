@@ -1673,6 +1673,8 @@ module Telegram
         handle_message_content_update(raw)
       when "updateDeleteMessages"
         handle_delete_messages_update(raw)
+      when "updateMessagePoll"
+        handle_message_poll_update(raw)
       when "updateChatTitle"
         td_chat_id = raw["chat_id"]
         title = raw["title"]
@@ -1766,6 +1768,13 @@ module Telegram
       end
     end
 
+    def handle_message_poll_update(raw)
+      payload = parse_message_poll_update(raw)
+      return if payload.nil?
+
+      upsert_message_poll_snapshot(payload)
+    end
+
     def parse_message_content_update(raw)
       payload = normalize_unsupported_update_payload(raw)
       td_chat_id = payload["chat_id"].to_i
@@ -1805,6 +1814,125 @@ module Telegram
         messages:,
         payload:
       }
+    end
+
+    def parse_message_poll_update(raw)
+      payload = normalize_unsupported_update_payload(raw)
+      td_chat_id = payload["chat_id"].to_i
+      td_message_id = payload["message_id"].to_i
+      message_id = decode_message_id_from_td(td_message_id)
+      poll_payload = payload["poll"]
+      return nil if td_chat_id.zero? || td_message_id <= 0 || message_id.to_i <= 0
+      return nil unless poll_payload.is_a?(Hash)
+
+      normalized_poll_payload = poll_payload.deep_stringify_keys
+      poll_id = normalized_poll_payload["id"].to_s
+      return nil if poll_id.blank?
+
+      options = extract_message_poll_options(normalized_poll_payload["options"])
+
+      {
+        td_chat_id: td_chat_id,
+        td_message_id: td_message_id,
+        message_id: message_id.to_i,
+        poll_id: poll_id,
+        question: normalized_poll_payload["question"],
+        is_anonymous: boolean_or_default(normalized_poll_payload["is_anonymous"], default: true),
+        allows_multiple_answers: boolean_or_default(normalized_poll_payload["allows_multiple_answers"], default: false),
+        total_voter_count: normalized_poll_payload["total_voter_count"].to_i,
+        is_closed: boolean_or_default(normalized_poll_payload["is_closed"], default: false),
+        options: options,
+        chosen_option_indexes: options.filter_map { |option| option[:option_index] if option[:is_chosen] },
+        payload: payload,
+        poll_payload: normalized_poll_payload
+      }
+    end
+
+    def extract_message_poll_options(raw_options)
+      return [] unless raw_options.is_a?(Array)
+
+      raw_options.each_with_index.filter_map do |option, index|
+        next unless option.is_a?(Hash)
+
+        normalized_option = option.deep_stringify_keys
+        {
+          option_index: index,
+          text: normalized_option["text"],
+          voter_count: normalized_option["voter_count"].to_i,
+          is_chosen: boolean_or_default(normalized_option["is_chosen"], default: false),
+          is_correct: normalized_option.key?("is_correct") ? ActiveModel::Type::Boolean.new.cast(normalized_option["is_correct"]) : nil
+        }
+      end
+    end
+
+    def boolean_or_default(value, default:)
+      return default if value.nil?
+
+      ActiveModel::Type::Boolean.new.cast(value)
+    end
+
+    def upsert_message_poll_snapshot(payload)
+      now = Time.current
+
+      TelegramPoll.transaction do
+        TelegramPoll.upsert_all(
+          [
+            {
+              telegram_account_id: @account_id,
+              td_chat_id: payload[:td_chat_id],
+              message_id: payload[:message_id],
+              poll_id: payload[:poll_id],
+              question: payload[:question],
+              is_anonymous: payload[:is_anonymous],
+              allows_multiple_answers: payload[:allows_multiple_answers],
+              total_voter_count: payload[:total_voter_count],
+              is_closed: payload[:is_closed],
+              raw_payload: payload[:poll_payload],
+              created_at: now,
+              updated_at: now
+            }
+          ],
+          unique_by: :index_telegram_polls_on_account_chat_message
+        )
+
+        poll = TelegramPoll.find_by(
+          telegram_account_id: @account_id,
+          td_chat_id: payload[:td_chat_id],
+          message_id: payload[:message_id]
+        )
+        return if poll.nil?
+
+        if payload[:options].any?
+          TelegramPollOption.upsert_all(
+            payload[:options].map do |option|
+              option.merge(
+                telegram_poll_id: poll.id,
+                created_at: now,
+                updated_at: now
+              )
+            end,
+            unique_by: :index_telegram_poll_options_on_poll_and_option
+          )
+        end
+
+        TelegramAccountPollState.upsert_all(
+          [
+            {
+              telegram_account_id: @account_id,
+              td_chat_id: payload[:td_chat_id],
+              message_id: payload[:message_id],
+              poll_id: payload[:poll_id],
+              chosen_option_indexes: payload[:chosen_option_indexes],
+              has_voted: payload[:chosen_option_indexes].any?,
+              snapshot_at: now,
+              raw_payload: payload[:payload],
+              created_at: now,
+              updated_at: now
+            }
+          ],
+          unique_by: :index_telegram_account_poll_states_on_account_chat_message
+        )
+      end
     end
 
     def find_message_by_update_reference(td_chat_id:, td_message_id:, message_id:)
