@@ -24,7 +24,7 @@
 ## 3. 方案选型
 采用“事件日志 + 投票独立结构化表”方案：
 - `telegram_messages`：当前消息最新态。
-- `telegram_message_events`：变更事件审计日志。
+- `telegram_message_histories`：变更历史审计日志。
 - `telegram_polls` + `telegram_poll_options`：投票结构化数据。
 - `telegram_account_poll_states`：账号维度投票快照（该账号是否投票、投了哪些选项）。
 
@@ -46,7 +46,7 @@
 语义：
 - 此表只表示消息“当前最新状态”。
 
-### 4.2 新表：`telegram_message_events`
+### 4.2 新表：`telegram_message_histories`
 字段：
 - `telegram_account_id: bigint`（FK）
 - `td_chat_id: bigint`
@@ -116,23 +116,23 @@
 ### 5.1 `updateNewMessage`
 - 继续 upsert 到 `telegram_messages`。
 - 若消息内容为 poll，同步 upsert 投票主体与选项，并更新账号投票快照。
-- 不写 `telegram_message_events`。
+- 不写 `telegram_message_histories`。
 
 ### 5.2 `updateMessageContent`（编辑）
 - 更新 `telegram_messages` 当前态字段（`text` 等）并写 `edited_at`。
-- 写 `telegram_message_events(event_type='edited')`，payload 至少包含 before/after 关键字段。
+- 写 `telegram_message_histories(event_type='edited')`，payload 至少包含 before/after 关键字段。
 - 若内容涉及 poll，触发投票结构化更新。
 
 ### 5.3 `updateDeleteMessages`（删除）
 - 命中消息执行软删除：`deleted_at = Time.current`。
-- 写 `telegram_message_events(event_type='deleted')`，包含消息 id 列表与 `is_permanent` 等上下文。
+- 写 `telegram_message_histories(event_type='deleted')`，包含消息 id 列表与 `is_permanent` 等上下文。
 - 不物理删除 `telegram_messages`。
 
 ### 5.4 `updateMessagePoll`（投票更新）
 - upsert `telegram_polls` 当前状态。
 - upsert `telegram_poll_options`（票数、是否被该账号选中）。
 - upsert `telegram_account_poll_states`（该账号是否投票、已选项、快照时间）。
-- 不写 `telegram_message_events`。
+- 不写 `telegram_message_histories`。
 
 ## 6. 查询与 API 行为
 目标接口：`Api::MeController#search_messages`
