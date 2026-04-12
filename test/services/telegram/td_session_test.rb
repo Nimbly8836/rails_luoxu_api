@@ -646,7 +646,9 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal 456, history.message_id
     assert_equal 300_000_000_456, history.td_message_id
     assert_equal "edited", history.event_type
-    assert_equal "after edit", history.payload.dig("new_content", "text", "text")
+    assert_equal "before edit", history.payload.dig("before", "text")
+    assert_equal "after edit", history.payload.dig("after", "text")
+    assert_equal "after edit", history.payload.dig("update", "new_content", "text", "text")
     assert_in_delta message.edited_at.to_f, history.event_at.to_f, 1.0
   end
 
@@ -702,6 +704,114 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal "deleted", history.event_type
     assert_equal [ 300_000_000_222, 300_000_000_333 ], history.payload["message_ids"]
     assert_in_delta deleted_message.deleted_at.to_f, history.event_at.to_f, 1.0
+  end
+
+  test "unsupported updateMessageContent does not fall back to message_id lookup when td_message_id storage is available" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    message = TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_999,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_000),
+      message_id: 456,
+      text: "before edit"
+    )
+    update = Struct.new(:original_type, :raw).new(
+      "updateMessageContent",
+      {
+        "chat_id" => -100123,
+        "message_id" => 300_000_000_456,
+        "new_content" => {
+          "@type" => "messageText",
+          "text" => { "text" => "after edit" }
+        }
+      }
+    )
+
+    assert_no_difference("TelegramMessageHistory.where(event_type: 'edited').count") do
+      session.send(:handle_unsupported_update, update)
+    end
+
+    message.reload
+    assert_equal "before edit", message.text
+    assert_nil message.edited_at
+    assert_nil message.deleted_at
+  end
+
+  test "unsupported updateMessageContent rolls back message update when history write fails" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    message = TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_456,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_000),
+      message_id: 456,
+      text: "before edit"
+    )
+    update = Struct.new(:original_type, :raw).new(
+      "updateMessageContent",
+      {
+        "chat_id" => -100123,
+        "message_id" => 300_000_000_456,
+        "new_content" => {
+          "@type" => "messageText",
+          "text" => { "text" => "after edit" }
+        }
+      }
+    )
+    session.define_singleton_method(:create_message_history!) do |**|
+      raise ActiveRecord::RecordInvalid, TelegramMessageHistory.new
+    end
+
+    assert_raises(ActiveRecord::RecordInvalid) do
+      session.send(:handle_unsupported_update, update)
+    end
+
+    message.reload
+    assert_equal "before edit", message.text
+    assert_nil message.edited_at
+    assert_nil message.deleted_at
+    assert_equal 0, TelegramMessageHistory.where(event_type: "edited").count
+  end
+
+  test "unsupported updateDeleteMessages rolls back soft delete when history write fails" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    message = TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_222,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_100),
+      message_id: 222,
+      text: "delete me"
+    )
+    update = Struct.new(:original_type, :raw).new(
+      "updateDeleteMessages",
+      {
+        "chat_id" => -100123,
+        "message_ids" => [ 300_000_000_222 ],
+        "from_cache" => false,
+        "is_permanent" => true
+      }
+    )
+    session.define_singleton_method(:create_message_history!) do |**|
+      raise ActiveRecord::RecordInvalid, TelegramMessageHistory.new
+    end
+
+    assert_raises(ActiveRecord::RecordInvalid) do
+      session.send(:handle_unsupported_update, update)
+    end
+
+    message.reload
+    assert_nil message.deleted_at
+    assert_nil message.edited_at
+    assert_equal "delete me", message.text
+    assert_equal 0, TelegramMessageHistory.where(event_type: "deleted").count
   end
 
   private

@@ -1717,18 +1717,25 @@ module Telegram
       )
       return if message.nil?
 
-      event_at = Time.current
-      message.update_columns(
-        text: payload[:text],
-        edited_at: event_at,
-        updated_at: event_at
-      )
-      create_message_history!(
-        message:,
-        event_type: "edited",
-        event_at:,
-        payload: payload[:payload]
-      )
+      TelegramMessage.transaction do
+        event_at = Time.current
+        history_payload = edited_history_payload(
+          previous_text: message.text,
+          next_text: payload[:text],
+          update_payload: payload[:payload]
+        )
+        message.update_columns(
+          text: payload[:text],
+          edited_at: event_at,
+          updated_at: event_at
+        )
+        create_message_history!(
+          message:,
+          event_type: "edited",
+          event_at:,
+          payload: history_payload
+        )
+      end
     end
 
     def handle_delete_messages_update(raw)
@@ -1743,17 +1750,19 @@ module Telegram
         )
         next if message.nil?
 
-        event_at = Time.current
-        message.update_columns(
-          deleted_at: event_at,
-          updated_at: event_at
-        )
-        create_message_history!(
-          message:,
-          event_type: "deleted",
-          event_at:,
-          payload: payload[:payload]
-        )
+        TelegramMessage.transaction do
+          event_at = Time.current
+          message.update_columns(
+            deleted_at: event_at,
+            updated_at: event_at
+          )
+          create_message_history!(
+            message:,
+            event_type: "deleted",
+            event_at:,
+            payload: payload[:payload]
+          )
+        end
       end
     end
 
@@ -1804,10 +1813,18 @@ module Telegram
         td_chat_id: td_chat_id.to_i
       )
       if supports_td_message_id_storage? && td_message_id.to_i.positive?
-        scope.find_by(td_message_id: td_message_id.to_i) || scope.find_by(message_id: message_id.to_i)
+        scope.find_by(td_message_id: td_message_id.to_i)
       else
         scope.find_by(message_id: message_id.to_i)
       end
+    end
+
+    def edited_history_payload(previous_text:, next_text:, update_payload:)
+      {
+        "before" => { "text" => previous_text },
+        "after" => { "text" => next_text },
+        "update" => normalize_unsupported_update_payload(update_payload)
+      }
     end
 
     def create_message_history!(message:, event_type:, event_at:, payload:)
