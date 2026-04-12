@@ -2,6 +2,10 @@
 
 require "test_helper"
 
+class TelegramMessageHistory < ApplicationRecord
+  self.table_name = "telegram_message_histories"
+end
+
 class TelegramMessageHistoryTest < ActiveSupport::TestCase
   test "allows edited and deleted event types" do
     account = build_account
