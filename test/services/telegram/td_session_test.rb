@@ -15,6 +15,9 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
   teardown do
     clear_enqueued_jobs
     clear_performed_jobs
+    TelegramMessageHistory.delete_all
+    TelegramMessage.delete_all
+    TelegramAccount.delete_all
     ActiveJob::Base.queue_adapter = @original_queue_adapter
   end
 
@@ -604,11 +607,108 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     end
   end
 
+  test "unsupported updateMessageContent updates message text edited_at and writes edited history" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    message = TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_456,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_000),
+      message_id: 456,
+      text: "before edit"
+    )
+    update = Struct.new(:original_type, :raw).new(
+      "updateMessageContent",
+      {
+        "chat_id" => -100123,
+        "message_id" => 300_000_000_456,
+        "new_content" => {
+          "@type" => "messageText",
+          "text" => { "text" => "after edit" }
+        }
+      }
+    )
+
+    assert_difference("TelegramMessageHistory.where(event_type: 'edited').count", 1) do
+      session.send(:handle_unsupported_update, update)
+    end
+
+    message.reload
+    assert_equal "after edit", message.text
+    assert_not_nil message.edited_at
+    assert_nil message.deleted_at
+
+    history = TelegramMessageHistory.order(:created_at).last
+    assert_equal account.id, history.telegram_account_id
+    assert_equal(-100123, history.td_chat_id)
+    assert_equal 456, history.message_id
+    assert_equal 300_000_000_456, history.td_message_id
+    assert_equal "edited", history.event_type
+    assert_equal "after edit", history.payload.dig("new_content", "text", "text")
+    assert_in_delta message.edited_at.to_f, history.event_at.to_f, 1.0
+  end
+
+  test "unsupported updateDeleteMessages soft deletes matching messages and writes deleted history" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    kept_message = TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_111,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_000),
+      message_id: 111,
+      text: "keep me"
+    )
+    deleted_message = TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_222,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_100),
+      message_id: 222,
+      text: "delete me"
+    )
+    update = Struct.new(:original_type, :raw).new(
+      "updateDeleteMessages",
+      {
+        "chat_id" => -100123,
+        "message_ids" => [ 300_000_000_222, 300_000_000_333 ],
+        "from_cache" => false,
+        "is_permanent" => true
+      }
+    )
+
+    assert_difference("TelegramMessageHistory.where(event_type: 'deleted').count", 1) do
+      session.send(:handle_unsupported_update, update)
+    end
+
+    kept_message.reload
+    deleted_message.reload
+    assert_nil kept_message.deleted_at
+    assert_nil kept_message.edited_at
+    assert_equal "keep me", kept_message.text
+    assert_not_nil deleted_message.deleted_at
+    assert_nil deleted_message.edited_at
+    assert_equal "delete me", deleted_message.text
+
+    history = TelegramMessageHistory.order(:created_at).last
+    assert_equal account.id, history.telegram_account_id
+    assert_equal(-100123, history.td_chat_id)
+    assert_equal 222, history.message_id
+    assert_equal 300_000_000_222, history.td_message_id
+    assert_equal "deleted", history.event_type
+    assert_equal [ 300_000_000_222, 300_000_000_333 ], history.payload["message_ids"]
+    assert_in_delta deleted_message.deleted_at.to_f, history.event_at.to_f, 1.0
+  end
+
   private
 
-  def build_session
+  def build_session(account_id: 1)
     Telegram::TdSession.allocate.tap do |session|
-      session.instance_variable_set(:@account_id, 1)
+      session.instance_variable_set(:@account_id, account_id)
       session.instance_variable_set(:@id, "test-session")
       session.instance_variable_set(:@mutex, Mutex.new)
       session.instance_variable_set(:@operation_mutex, Mutex.new)
@@ -624,6 +724,16 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
       session.instance_variable_set(:@message_sync_scheduler_thread, nil)
       session.instance_variable_set(:@disposed, false)
     end
+  end
+
+  def create_account
+    uuid = SecureRandom.uuid
+    TelegramAccount.create!(
+      uuid: uuid,
+      state: "created",
+      database_directory: Rails.root.join("storage", "tdlib", uuid, "db").to_s,
+      files_directory: Rails.root.join("storage", "tdlib", uuid, "files").to_s
+    )
   end
 
   def with_env(overrides)

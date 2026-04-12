@@ -1669,6 +1669,10 @@ module Telegram
       when "updateNewMessage"
         message_raw = raw["message"]
         handle_new_message(message_raw) if message_raw.is_a?(Hash)
+      when "updateMessageContent"
+        handle_message_content_update(raw)
+      when "updateDeleteMessages"
+        handle_delete_messages_update(raw)
       when "updateChatTitle"
         td_chat_id = raw["chat_id"]
         title = raw["title"]
@@ -1700,6 +1704,126 @@ module Telegram
         chat_id: payload[:td_chat_id],
         frontier: history_frontier_from_messages([ payload ])
       )
+    end
+
+    def handle_message_content_update(raw)
+      payload = parse_message_content_update(raw)
+      return if payload.nil?
+
+      message = find_message_by_update_reference(
+        td_chat_id: payload[:td_chat_id],
+        td_message_id: payload[:td_message_id],
+        message_id: payload[:message_id]
+      )
+      return if message.nil?
+
+      event_at = Time.current
+      message.update_columns(
+        text: payload[:text],
+        edited_at: event_at,
+        updated_at: event_at
+      )
+      create_message_history!(
+        message:,
+        event_type: "edited",
+        event_at:,
+        payload: payload[:payload]
+      )
+    end
+
+    def handle_delete_messages_update(raw)
+      payload = parse_delete_messages_update(raw)
+      return if payload.nil?
+
+      payload[:messages].each do |message_ref|
+        message = find_message_by_update_reference(
+          td_chat_id: payload[:td_chat_id],
+          td_message_id: message_ref[:td_message_id],
+          message_id: message_ref[:message_id]
+        )
+        next if message.nil?
+
+        event_at = Time.current
+        message.update_columns(
+          deleted_at: event_at,
+          updated_at: event_at
+        )
+        create_message_history!(
+          message:,
+          event_type: "deleted",
+          event_at:,
+          payload: payload[:payload]
+        )
+      end
+    end
+
+    def parse_message_content_update(raw)
+      payload = normalize_unsupported_update_payload(raw)
+      td_chat_id = payload["chat_id"].to_i
+      td_message_id = payload["message_id"].to_i
+      message_id = decode_message_id_from_td(td_message_id)
+      return nil if td_chat_id.zero? || td_message_id <= 0 || message_id.to_i <= 0
+
+      {
+        td_chat_id: td_chat_id,
+        td_message_id: td_message_id,
+        message_id: message_id.to_i,
+        text: extract_message_text("content" => payload["new_content"]),
+        payload:
+      }
+    end
+
+    def parse_delete_messages_update(raw)
+      payload = normalize_unsupported_update_payload(raw)
+      td_chat_id = payload["chat_id"].to_i
+      raw_message_ids = payload["message_ids"]
+      return nil if td_chat_id.zero? || !raw_message_ids.is_a?(Array)
+
+      messages = raw_message_ids.filter_map do |td_message_id|
+        numeric_td_message_id = td_message_id.to_i
+        message_id = decode_message_id_from_td(numeric_td_message_id)
+        next if numeric_td_message_id <= 0 || message_id.to_i <= 0
+
+        {
+          td_message_id: numeric_td_message_id,
+          message_id: message_id.to_i
+        }
+      end
+      return nil if messages.empty?
+
+      {
+        td_chat_id: td_chat_id,
+        messages:,
+        payload:
+      }
+    end
+
+    def find_message_by_update_reference(td_chat_id:, td_message_id:, message_id:)
+      scope = TelegramMessage.where(
+        telegram_account_id: @account_id,
+        td_chat_id: td_chat_id.to_i
+      )
+      if supports_td_message_id_storage? && td_message_id.to_i.positive?
+        scope.find_by(td_message_id: td_message_id.to_i) || scope.find_by(message_id: message_id.to_i)
+      else
+        scope.find_by(message_id: message_id.to_i)
+      end
+    end
+
+    def create_message_history!(message:, event_type:, event_at:, payload:)
+      TelegramMessageHistory.create!(
+        telegram_account_id: @account_id,
+        td_chat_id: message.td_chat_id,
+        message_id: message.message_id,
+        td_message_id: message.td_message_id,
+        event_type: event_type,
+        event_at: event_at,
+        payload: normalize_unsupported_update_payload(payload)
+      )
+    end
+
+    def normalize_unsupported_update_payload(payload)
+      payload.is_a?(Hash) ? payload.deep_stringify_keys : {}
     end
 
     def watched_chat_ids
