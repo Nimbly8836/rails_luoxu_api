@@ -47,6 +47,23 @@ class TelegramPollTest < ActiveSupport::TestCase
     assert_equal poll_two, message_two.telegram_poll
   end
 
+  test "destroying an account destroys polls before poll options" do
+    account = build_account
+    poll = build_poll(account: account)
+    poll.save!
+
+    option = TelegramPollOption.create!(
+      telegram_poll: poll,
+      option_index: 0,
+      text: "Option A"
+    )
+
+    account.destroy!
+
+    refute TelegramPoll.exists?(poll.id)
+    refute TelegramPollOption.exists?(option.id)
+  end
+
   test "requires td_chat_id message_id and poll_id" do
     poll = build_poll(
       account: build_account,
