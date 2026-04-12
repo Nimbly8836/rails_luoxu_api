@@ -38,6 +38,9 @@ class TelegramAccount < ApplicationRecord
     return true if TelegramAccountProfile.exists?(telegram_account_id: id)
     return true if TelegramChat.exists?(telegram_account_id: id)
     return true if TelegramMessage.exists?(telegram_account_id: id)
+    return true if TelegramMessageHistory.exists?(telegram_account_id: id)
+    return true if TelegramPoll.exists?(telegram_account_id: id)
+    return true if TelegramAccountPollState.exists?(telegram_account_id: id)
     return true if TelegramAccountWatchTarget.exists?(telegram_account_id: id)
 
     false

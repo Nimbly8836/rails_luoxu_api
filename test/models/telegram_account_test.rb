@@ -25,6 +25,39 @@ class TelegramAccountTest < ActiveSupport::TestCase
     assert_predicate account, :login_progressed?
   end
 
+  test "account with history or poll data is not an auto cleanup candidate" do
+    account = build_account(state: "created")
+
+    TelegramMessageHistory.create!(
+      telegram_account: account,
+      td_chat_id: 123,
+      message_id: 456,
+      event_type: "edited",
+      event_at: Time.current,
+      payload: {}
+    )
+    TelegramPoll.create!(
+      telegram_account: account,
+      td_chat_id: 123,
+      message_id: 456,
+      poll_id: "poll_123",
+      question: "Question?",
+      raw_payload: {}
+    )
+    TelegramAccountPollState.create!(
+      telegram_account: account,
+      td_chat_id: 123,
+      message_id: 456,
+      poll_id: "poll_123",
+      chosen_option_indexes: [],
+      snapshot_at: Time.current,
+      raw_payload: {}
+    )
+
+    refute_predicate account.reload, :auto_cleanup_candidate?
+    assert_predicate account, :login_progressed?
+  end
+
   private
 
   def build_account(state:, **attrs)

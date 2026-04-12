@@ -114,7 +114,10 @@ module Telegram
 
         stop(account.uuid)
         purge_account_storage!(account)
-        TelegramAccount.where(id: account.id).delete_all
+        TelegramPollOption.joins(:telegram_poll)
+                          .where(telegram_polls: { telegram_account_id: account.id })
+                          .delete_all
+        account.destroy!
         Rails.logger.info("Deleted transient Telegram account #{account.uuid}: #{reason}")
       end
 

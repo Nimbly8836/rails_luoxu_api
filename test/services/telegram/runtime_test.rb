@@ -24,6 +24,21 @@ class TelegramRuntimeTest < ActiveSupport::TestCase
     refute Dir.exist?(uuid_root)
   end
 
+  test "delete_account removes owned history and poll rows before removing the account" do
+    account = create_account(state: "created")
+    uuid_root = File.dirname(account.database_directory)
+    create_owned_records(account)
+
+    Telegram::Runtime.delete_account!(account, reason: "manual_purge")
+
+    refute TelegramAccount.exists?(account.id)
+    refute TelegramMessageHistory.exists?(telegram_account_id: account.id)
+    refute TelegramPoll.exists?(telegram_account_id: account.id)
+    refute TelegramAccountPollState.exists?(telegram_account_id: account.id)
+    refute TelegramPollOption.joins(:telegram_poll).where(telegram_polls: { telegram_account_id: account.id }).exists?
+    refute Dir.exist?(uuid_root)
+  end
+
   test "cleanup keeps stale accounts that already entered login flow" do
     account = create_account(state: "wait_code", phone_number: "+8613800000000")
     uuid_root = File.dirname(account.database_directory)
@@ -55,6 +70,42 @@ class TelegramRuntimeTest < ActiveSupport::TestCase
         database_directory: db_dir.to_s,
         files_directory: files_dir.to_s
       }.merge(attrs)
+    )
+  end
+
+  def create_owned_records(account)
+    TelegramMessageHistory.create!(
+      telegram_account: account,
+      td_chat_id: 123,
+      message_id: 456,
+      event_type: "edited",
+      event_at: Time.current,
+      payload: {}
+    )
+
+    poll = TelegramPoll.create!(
+      telegram_account: account,
+      td_chat_id: 123,
+      message_id: 456,
+      poll_id: "poll_123",
+      question: "Question?",
+      raw_payload: {}
+    )
+
+    TelegramPollOption.create!(
+      telegram_poll: poll,
+      option_index: 0,
+      text: "A"
+    )
+
+    TelegramAccountPollState.create!(
+      telegram_account: account,
+      td_chat_id: 123,
+      message_id: 456,
+      poll_id: "poll_123",
+      chosen_option_indexes: [],
+      snapshot_at: Time.current,
+      raw_payload: {}
     )
   end
 end
