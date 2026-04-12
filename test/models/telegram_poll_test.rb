@@ -18,6 +18,35 @@ class TelegramPollTest < ActiveSupport::TestCase
     assert_equal :has_many, TelegramPoll.reflect_on_association(:telegram_poll_options).macro
   end
 
+  test "message poll lookup stays scoped by account and chat" do
+    account = build_account
+    poll_one = build_poll(account: account, td_chat_id: 111, message_id: 456, poll_id: "poll_one")
+    poll_two = build_poll(account: account, td_chat_id: 222, message_id: 456, poll_id: "poll_two")
+    poll_one.save!
+    poll_two.save!
+
+    TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: 111,
+      td_message_id: 111_456,
+      message_id: 456,
+      message_at: Time.current
+    )
+    TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: 222,
+      td_message_id: 222_456,
+      message_id: 456,
+      message_at: Time.current
+    )
+
+    message_one = TelegramMessage.find_by!(telegram_account: account, td_chat_id: 111, message_id: 456)
+    message_two = TelegramMessage.find_by!(telegram_account: account, td_chat_id: 222, message_id: 456)
+
+    assert_equal poll_one, message_one.telegram_poll
+    assert_equal poll_two, message_two.telegram_poll
+  end
+
   test "requires td_chat_id message_id and poll_id" do
     poll = build_poll(
       account: build_account,
