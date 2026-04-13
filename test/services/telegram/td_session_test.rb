@@ -980,6 +980,140 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     end
   end
 
+  test "unsupported updateMessagePoll ignores malformed options payload without changing snapshot" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    initial_update = Struct.new(:original_type, :raw).new(
+      "updateMessagePoll",
+      {
+        "chat_id" => -100123,
+        "message_id" => 300_000_000_456,
+        "poll" => {
+          "id" => "poll_123",
+          "question" => "Initial question",
+          "is_anonymous" => false,
+          "allows_multiple_answers" => true,
+          "total_voter_count" => 7,
+          "is_closed" => false,
+          "options" => [
+            {
+              "text" => "A",
+              "voter_count" => 3,
+              "is_chosen" => false
+            },
+            {
+              "text" => "B",
+              "voter_count" => 4,
+              "is_chosen" => true
+            }
+          ]
+        }
+      }
+    )
+    session.send(:handle_unsupported_update, initial_update)
+
+    poll = TelegramPoll.find_by!(telegram_account_id: account.id, td_chat_id: -100123, message_id: 456)
+    state = TelegramAccountPollState.find_by!(telegram_account_id: account.id, td_chat_id: -100123, message_id: 456)
+    baseline_poll_updated_at = poll.updated_at
+    baseline_state_updated_at = state.updated_at
+    baseline_option_snapshot = poll.telegram_poll_options.order(:option_index).map { |option| [ option.text, option.voter_count, option.is_chosen ] }
+
+    malformed_update = Struct.new(:original_type, :raw).new(
+      "updateMessagePoll",
+      {
+        "chat_id" => -100123,
+        "message_id" => 300_000_000_456,
+        "poll" => {
+          "id" => "poll_123",
+          "question" => "Broken question",
+          "is_anonymous" => true,
+          "allows_multiple_answers" => false,
+          "total_voter_count" => 99,
+          "is_closed" => true,
+          "options" => [
+            {
+              "text" => "A",
+              "voter_count" => 5,
+              "is_chosen" => true
+            },
+            {
+              "voter_count" => 4,
+              "is_chosen" => false
+            }
+          ]
+        }
+      }
+    )
+
+    assert_no_difference("TelegramPoll.count") do
+      assert_no_difference("TelegramPollOption.count") do
+        assert_no_difference("TelegramAccountPollState.count") do
+          assert_no_difference("TelegramMessageHistory.count") do
+            session.send(:handle_unsupported_update, malformed_update)
+          end
+        end
+      end
+    end
+
+    poll.reload
+    state.reload
+    assert_equal "Initial question", poll.question
+    assert_equal false, poll.is_anonymous
+    assert_equal true, poll.allows_multiple_answers
+    assert_equal 7, poll.total_voter_count
+    assert_equal false, poll.is_closed
+    assert_equal baseline_poll_updated_at, poll.updated_at
+    assert_equal baseline_state_updated_at, state.updated_at
+    assert_equal true, state.has_voted
+    assert_equal [ 1 ], state.chosen_option_indexes
+    assert_equal baseline_option_snapshot, poll.telegram_poll_options.order(:option_index).map { |option| [ option.text, option.voter_count, option.is_chosen ] }
+  end
+
+  test "unsupported updateMessagePoll rolls back snapshot when option upsert fails" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    update = Struct.new(:original_type, :raw).new(
+      "updateMessagePoll",
+      {
+        "chat_id" => -100123,
+        "message_id" => 300_000_000_456,
+        "poll" => {
+          "id" => "poll_123",
+          "question" => "Rollback me",
+          "is_anonymous" => false,
+          "allows_multiple_answers" => true,
+          "total_voter_count" => 7,
+          "is_closed" => false,
+          "options" => [
+            {
+              "text" => "A",
+              "voter_count" => 3,
+              "is_chosen" => false
+            },
+            {
+              "text" => "B",
+              "voter_count" => 4,
+              "is_chosen" => true
+            }
+          ]
+        }
+      }
+    )
+
+    error = Class.new(StandardError)
+
+    TelegramPollOption.stub(:upsert_all, ->(*) { raise error, "boom" }) do
+      assert_raises(error) do
+        session.send(:handle_unsupported_update, update)
+      end
+    end
+
+    assert_equal 0, TelegramPoll.where(telegram_account_id: account.id).count
+    assert_equal 0, TelegramPollOption.count
+    assert_equal 0, TelegramAccountPollState.where(telegram_account_id: account.id).count
+    assert_equal 0, TelegramMessageHistory.where(telegram_account_id: account.id).count
+  end
+
   private
 
   def build_session(account_id: 1)
