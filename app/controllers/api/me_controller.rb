@@ -73,6 +73,7 @@ module Api
       query = params.require(:q).to_s.strip
       chat_id = params[:chat_id].to_i if params[:chat_id].present?
       user_ids = normalize_integer_list(params[:user_ids])
+      include_deleted = ActiveModel::Type::Boolean.new.cast(params[:include_deleted])
       resolve_links = ActiveModel::Type::Boolean.new.cast(params[:resolve_links])
       page = params[:page].to_i
       page = 1 if page < 1
@@ -84,6 +85,7 @@ module Api
       return render json: [] if permitted_ids.empty?
 
       scope = TelegramMessage.where(td_chat_id: permitted_ids)
+      scope = scope.where(deleted_at: nil) unless include_deleted
       scope = scope.where(td_sender_id: user_ids) if user_ids.any?
       if query.present?
         mode = params[:mode].to_s
@@ -110,6 +112,8 @@ module Api
                  .offset(offset)
                  .limit(per_page)
 
+      poll_map = poll_map_for(messages)
+      account_poll_state_map = account_poll_state_map_for(messages)
       member_map = TelegramChatUsername.where(
         group_id: messages.map(&:td_chat_id).uniq,
         uid: messages.map(&:td_sender_id).compact.uniq
@@ -124,6 +128,8 @@ module Api
           serialize_message(
             message,
             member_map,
+            poll_map:,
+            account_poll_state_map:,
             resolve_links:,
             message_link_sessions:
           ).merge(highlight: message.try(:highlight))
@@ -145,8 +151,9 @@ module Api
       }
     end
 
-    def serialize_message(message, member_map, resolve_links:, message_link_sessions:)
+    def serialize_message(message, member_map, poll_map:, account_poll_state_map:, resolve_links:, message_link_sessions:)
       member = member_map[[ message.td_chat_id, message.td_sender_id ]]
+      poll_key = [ message.telegram_account_id, message.td_chat_id, message.message_id ]
       resolved_link = resolve_links ? resolve_message_link_data(message, message_link_sessions:) : {}
       channel_id = resolved_link[:channel_id] || telegram_privatepost_channel_id(message.td_chat_id)
       post_id = resolved_link[:post_id] || message.message_id
@@ -165,7 +172,32 @@ module Api
         sender_username: member&.username,
         sender_avatar_small_content_type: member&.avatar_small_content_type,
         sender_avatar_small_base64: base64_blob(member&.avatar_small_data),
-        message_at: message.message_at
+        message_at: message.message_at,
+        poll: serialize_poll(poll_map[poll_key], account_poll_state_map[poll_key])
+      }
+    end
+
+    def serialize_poll(poll, account_state)
+      return nil if poll.nil?
+
+      {
+        question: poll.question,
+        is_anonymous: poll.is_anonymous,
+        allows_multiple_answers: poll.allows_multiple_answers,
+        total_voter_count: poll.total_voter_count,
+        is_closed: poll.is_closed,
+        options: poll.telegram_poll_options.sort_by(&:option_index).map do |option|
+          {
+            option_index: option.option_index,
+            text: option.text,
+            voter_count: option.voter_count,
+            is_chosen: option.is_chosen
+          }
+        end,
+        account_state: {
+          has_voted: account_state&.has_voted || false,
+          chosen_option_indexes: account_state&.chosen_option_indexes || []
+        }
       }
     end
 
@@ -195,6 +227,30 @@ module Api
         .filter_map { |value| Integer(value, exception: false) }
         .reject(&:zero?)
         .uniq
+    end
+
+    def poll_map_for(messages)
+      return {} if messages.empty?
+
+      TelegramPoll.where(
+        telegram_account_id: messages.map(&:telegram_account_id).uniq,
+        td_chat_id: messages.map(&:td_chat_id).uniq,
+        message_id: messages.map(&:message_id).uniq
+      ).includes(:telegram_poll_options).index_by do |poll|
+        [ poll.telegram_account_id, poll.td_chat_id, poll.message_id ]
+      end
+    end
+
+    def account_poll_state_map_for(messages)
+      return {} if messages.empty?
+
+      TelegramAccountPollState.where(
+        telegram_account_id: messages.map(&:telegram_account_id).uniq,
+        td_chat_id: messages.map(&:td_chat_id).uniq,
+        message_id: messages.map(&:message_id).uniq
+      ).index_by do |account_state|
+        [ account_state.telegram_account_id, account_state.td_chat_id, account_state.message_id ]
+      end
     end
 
     def telegram_privatepost_channel_id(td_chat_id)
