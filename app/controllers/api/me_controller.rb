@@ -230,27 +230,31 @@ module Api
     end
 
     def poll_map_for(messages)
-      return {} if messages.empty?
-
-      TelegramPoll.where(
-        telegram_account_id: messages.map(&:telegram_account_id).uniq,
-        td_chat_id: messages.map(&:td_chat_id).uniq,
-        message_id: messages.map(&:message_id).uniq
-      ).includes(:telegram_poll_options).index_by do |poll|
+      exact_message_tuple_scope(TelegramPoll.all, messages)
+        .includes(:telegram_poll_options)
+        .index_by do |poll|
         [ poll.telegram_account_id, poll.td_chat_id, poll.message_id ]
       end
     end
 
     def account_poll_state_map_for(messages)
-      return {} if messages.empty?
-
-      TelegramAccountPollState.where(
-        telegram_account_id: messages.map(&:telegram_account_id).uniq,
-        td_chat_id: messages.map(&:td_chat_id).uniq,
-        message_id: messages.map(&:message_id).uniq
-      ).index_by do |account_state|
+      exact_message_tuple_scope(TelegramAccountPollState.all, messages)
+        .index_by do |account_state|
         [ account_state.telegram_account_id, account_state.td_chat_id, account_state.message_id ]
       end
+    end
+
+    def exact_message_tuple_scope(scope, messages)
+      tuples = messages.map { |message| [ message.telegram_account_id, message.td_chat_id, message.message_id ] }.uniq
+      return scope.none if tuples.empty?
+
+      placeholders = tuples.map { "(?, ?, ?)" }.join(", ")
+      predicate = ActiveRecord::Base.send(
+        :sanitize_sql_array,
+        [ "(telegram_account_id, td_chat_id, message_id) IN (#{placeholders})", *tuples.flatten ]
+      )
+
+      scope.where(predicate)
     end
 
     def telegram_privatepost_channel_id(td_chat_id)

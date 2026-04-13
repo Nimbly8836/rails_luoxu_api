@@ -135,6 +135,82 @@ module Api
       )
     end
 
+    test "search_messages loads poll snapshots by exact message tuples" do
+      user = create_system_user
+      primary_account = create_account
+      secondary_account = create_account
+      primary_chat_id = 111_111
+      secondary_chat_id = 222_222
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: primary_chat_id)
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: secondary_chat_id)
+
+      first_message = TelegramMessage.create!(
+        telegram_account: primary_account,
+        td_chat_id: primary_chat_id,
+        td_message_id: 3001,
+        td_sender_id: 4001,
+        message_id: 701,
+        message_at: Time.current - 1.minute,
+        text: "first poll message"
+      )
+      second_message = TelegramMessage.create!(
+        telegram_account: secondary_account,
+        td_chat_id: secondary_chat_id,
+        td_message_id: 3002,
+        td_sender_id: 4002,
+        message_id: 702,
+        message_at: Time.current,
+        text: "second poll message"
+      )
+
+      create_poll_snapshot(
+        account: primary_account,
+        chat_id: primary_chat_id,
+        message_id: first_message.message_id,
+        poll_id: "poll_701",
+        question: "Primary question"
+      )
+      create_poll_snapshot(
+        account: secondary_account,
+        chat_id: secondary_chat_id,
+        message_id: second_message.message_id,
+        poll_id: "poll_702",
+        question: "Secondary question"
+      )
+
+      create_poll_snapshot(
+        account: primary_account,
+        chat_id: secondary_chat_id,
+        message_id: first_message.message_id,
+        poll_id: "poll_distractor_1",
+        question: "Distractor one"
+      )
+      create_poll_snapshot(
+        account: secondary_account,
+        chat_id: primary_chat_id,
+        message_id: second_message.message_id,
+        poll_id: "poll_distractor_2",
+        question: "Distractor two"
+      )
+
+      poll_queries = capture_sql_queries(/FROM "telegram_polls"|FROM "telegram_account_poll_states"/) do
+        get "/api/me/search/messages", params: { q: "" }, headers: auth_headers(user)
+      end
+
+      assert_response :success
+
+      items = response.parsed_body.fetch("items")
+      assert_equal [ "Secondary question", "Primary question" ], items.map { |item| item.dig("poll", "question") }
+
+      assert_equal 2, poll_queries.size
+      poll_queries.each do |query|
+        assert_match(/\(\s*telegram_account_id\s*,\s*td_chat_id\s*,\s*message_id\s*\)\s+IN\s+\(\(/, query)
+        refute_match(/telegram_account_id IN \(/, query)
+        refute_match(/td_chat_id IN \(/, query)
+        refute_match(/message_id IN \(/, query)
+      end
+    end
+
     private
 
     def auth_headers(user)
@@ -161,6 +237,52 @@ module Api
         database_directory: Rails.root.join("tmp", "tdlib", uuid, "db").to_s,
         files_directory: Rails.root.join("tmp", "tdlib", uuid, "files").to_s
       )
+    end
+
+    def create_poll_snapshot(account:, chat_id:, message_id:, poll_id:, question:)
+      poll = TelegramPoll.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        message_id: message_id,
+        poll_id: poll_id,
+        question: question,
+        is_anonymous: false,
+        allows_multiple_answers: false,
+        total_voter_count: 1,
+        is_closed: false,
+        raw_payload: {}
+      )
+      TelegramPollOption.create!(
+        telegram_poll: poll,
+        option_index: 0,
+        text: "Only option",
+        voter_count: 1,
+        is_chosen: true
+      )
+      TelegramAccountPollState.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        message_id: message_id,
+        poll_id: poll_id,
+        has_voted: true,
+        chosen_option_indexes: [ 0 ],
+        snapshot_at: Time.current,
+        raw_payload: {}
+      )
+    end
+
+    def capture_sql_queries(pattern)
+      queries = []
+      callback = lambda do |_name, _start, _finish, _id, payload|
+        sql = payload[:sql].to_s
+        queries << sql if sql.match?(pattern)
+      end
+
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+        yield
+      end
+
+      queries
     end
   end
 end
