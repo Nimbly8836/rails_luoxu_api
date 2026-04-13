@@ -86,6 +86,20 @@ module Telegram
         true
       end
 
+      def sync_enabled_accounts_messages_async!(reason: "recurring")
+        return 0 unless telegram_accounts_table_exists?
+
+        synced = 0
+        TelegramAccount.where(enabled: true).find_each do |account|
+          session = fetch(account.uuid) || start(account)
+          session.sync_messages_for_watched_chats_async(reason:)
+          synced += 1
+        rescue StandardError => e
+          Rails.logger.warn("Failed scheduling watched-chat sync for Telegram account #{account.uuid}: #{e.message}")
+        end
+        synced
+      end
+
       def delete_account!(account, reason: "manual_purge")
         destroy_account!(account, reason:, force: true)
       end

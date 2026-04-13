@@ -16,3 +16,6 @@ production:
   cleanup_transient_telegram_sessions:
     command: "Telegram::Runtime.cleanup_stale_transient_accounts!"
     schedule: every 15 minutes
+  sync_watched_telegram_chats:
+    command: "Telegram::Runtime.sync_enabled_accounts_messages_async!"
+    schedule: every minute

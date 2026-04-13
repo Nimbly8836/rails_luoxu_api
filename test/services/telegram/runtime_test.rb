@@ -54,6 +54,28 @@ class TelegramRuntimeTest < ActiveSupport::TestCase
     FileUtils.rm_rf(uuid_root) if uuid_root.present?
   end
 
+  test "sync_enabled_accounts_messages_async schedules watched chat sync for enabled accounts only" do
+    enabled_account = create_account(state: "ready", enabled: true)
+    create_account(state: "ready", enabled: false)
+
+    sync_calls = []
+    fake_session = Object.new
+    fake_session.define_singleton_method(:sync_messages_for_watched_chats_async) do |reason:|
+      sync_calls << reason
+    end
+
+    Telegram::Runtime.stub(:fetch, nil) do
+      Telegram::Runtime.stub(:start, fake_session) do
+        synced = Telegram::Runtime.sync_enabled_accounts_messages_async!(reason: "recurring")
+
+        assert_equal 1, synced
+        assert_equal [ "recurring" ], sync_calls
+      end
+    end
+  ensure
+    FileUtils.rm_rf(File.dirname(enabled_account.database_directory)) if enabled_account
+  end
+
   private
 
   def create_account(state:, **attrs)
