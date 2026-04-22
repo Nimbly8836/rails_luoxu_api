@@ -10,17 +10,23 @@
 # Make sure RUBY_VERSION matches the Ruby version in .ruby-version
 ARG RUBY_VERSION=3.4.5
 ARG TDLIB_COMMIT=9b6ff5863
+ARG TDLIB_IMAGE=ghcr.io/nimbly8836/rails_luoxu_api-tdlib
+ARG TDLIB_IMAGE_TAG=${TDLIB_COMMIT}
 FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
 
 # Rails app lives here
 WORKDIR /rails
 
+# Keep apt metadata in BuildKit cache mounts instead of deleting it every build.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean
+
 # Install base packages
-RUN apt-get update -qq && \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update -qq && \
     apt-get install --no-install-recommends -y curl libjemalloc2 libvips postgresql-client && \
     (apt-get install --no-install-recommends -y libc++1-18 libc++abi1-18 || \
-     apt-get install --no-install-recommends -y libc++1 libc++abi1) && \
-    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+     apt-get install --no-install-recommends -y libc++1 libc++abi1)
 
 # Set production environment
 ENV RAILS_ENV="production" \
@@ -31,66 +37,28 @@ ENV RAILS_ENV="production" \
     SOLID_QUEUE_IN_PUMA="true" \
     SOLID_QUEUE_SUPERVISOR_MODE="async"
 
-# Build TDLib from source and export libtdjson.so (cache-friendly stage).
-FROM base AS tdlib-build
-ARG TDLIB_COMMIT
-
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y \
-      ca-certificates \
-      cmake \
-      git \
-      gperf \
-      libssl-dev \
-      make \
-      php-cli \
-      zlib1g-dev && \
-    (apt-get install --no-install-recommends -y clang-18 libc++-18-dev libc++abi-18-dev || \
-     apt-get install --no-install-recommends -y clang libc++-dev libc++abi-dev) && \
-    rm -rf /var/lib/apt/lists /var/cache/apt/archives
-
-RUN set -eux; \
-    git clone https://github.com/tdlib/td.git /tmp/td; \
-    cd /tmp/td; \
-    git checkout "${TDLIB_COMMIT}"; \
-    rm -rf build; \
-    mkdir build; \
-    cd build; \
-    cc_bin="$(command -v clang-18 || command -v clang)"; \
-    cxx_bin="$(command -v clang++-18 || command -v clang++)"; \
-    CXXFLAGS="-stdlib=libc++" \
-    CC="${cc_bin}" \
-    CXX="${cxx_bin}" \
-    cmake -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_INSTALL_PREFIX:PATH=../tdlib \
-          ..; \
-    cmake --build . --target tdjson -j"$(nproc)"; \
-    lib_file="$(find . -type f -name 'libtdjson.so' | head -n1)"; \
-    if [ -z "${lib_file}" ]; then \
-      lib_file="$(find . -type f -name 'libtdjson.so.*' | sort -V | tail -n1)"; \
-    fi; \
-    test -n "${lib_file}"; \
-    install -Dm755 "${lib_file}" /out/libtdjson.so; \
-    ls -l /out/libtdjson.so
+FROM ${TDLIB_IMAGE}:${TDLIB_IMAGE_TAG} AS tdlib-runtime
 
 # Throw-away build stage to reduce size of final image
 FROM base AS build
 
 # Install packages needed to build gems
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential git libpq-dev libyaml-dev pkg-config && \
-    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update -qq && \
+    apt-get install --no-install-recommends -y build-essential git libpq-dev libyaml-dev pkg-config
 
 # Install application gems
 COPY Gemfile Gemfile.lock ./
-RUN bundle install && \
-    rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
+RUN --mount=type=cache,target=/usr/local/bundle/cache,sharing=locked \
+    bundle install && \
+    rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
     bundle exec bootsnap precompile --gemfile
 
 # Copy application code
 COPY . .
-# Use tdlib binary compiled in tdlib-build stage.
-COPY --from=tdlib-build /out/libtdjson.so /rails/lib/libtdjson.so
+# Use tdlib binary from the dedicated tdlib base image.
+COPY --from=tdlib-runtime /libtdjson.so /rails/lib/libtdjson.so
 
 # Precompile bootsnap code for faster boot times
 RUN bundle exec bootsnap precompile app/ lib/
