@@ -244,6 +244,42 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_nil bundles.first.dig(:message, :sender_name)
   end
 
+  test "history extraction parses unsupported foundChatMessages payloads" do
+    session = build_session
+    response = Struct.new(:original_type, :raw).new(
+      "foundChatMessages",
+      {
+        "messages" => [
+          {
+            "id" => 300_000_000_123,
+            "chat_id" => -100123,
+            "date" => 1_700_000_000,
+            "sender_id" => {
+              "@type" => "messageSenderUser",
+              "user_id" => 42
+            },
+            "content" => {
+              "@type" => "messagePoll",
+              "poll" => {
+                "id" => "poll_123",
+                "question" => "Recovered by search",
+                "options" => []
+              }
+            }
+          }
+        ]
+      }
+    )
+
+    bundles = session.send(:extract_history_messages, response, resolve_sender_names: false)
+
+    assert_equal 1, session.send(:extract_history_count, response)
+    assert_equal "Struct", session.send(:describe_response, response)[:class]
+    assert_equal 1, bundles.size
+    assert_equal "Recovered by search", bundles.first.dig(:message, :text)
+    assert_equal "poll_123", bundles.first.dig(:poll_snapshot, :poll_id)
+  end
+
   test "history fetch reduces batch size after timeout" do
     session = build_session
     local_response = Object.new

@@ -2099,29 +2099,15 @@ module Telegram
     end
 
     def extract_history_messages(response, resolve_sender_names: true)
-      return [] if response.nil?
-      messages =
-        if response.respond_to?(:messages)
-          response.messages
-        elsif defined?(TD::Types::Unsupported) && response.is_a?(TD::Types::Unsupported) && response.original_type == "messages"
-          raw_messages = response.raw.is_a?(Hash) ? response.raw["messages"] : nil
-          raw_messages.is_a?(Array) ? raw_messages : nil
-        end
+      messages = history_messages_from_response(response)
       return [] unless messages.respond_to?(:map)
 
       messages.map { |message| extract_message_bundle(message, resolve_sender_names:) }.compact
     end
 
     def extract_history_count(response)
-      return 0 if response.nil?
-
-      if response.respond_to?(:messages)
-        messages = response.messages
-        return messages.size if messages.respond_to?(:size)
-      elsif defined?(TD::Types::Unsupported) && response.is_a?(TD::Types::Unsupported) && response.original_type == "messages"
-        raw_messages = response.raw.is_a?(Hash) ? response.raw["messages"] : nil
-        return raw_messages.size if raw_messages.is_a?(Array)
-      end
+      messages = history_messages_from_response(response)
+      return messages.size if messages.respond_to?(:size)
 
       0
     end
@@ -2132,18 +2118,30 @@ module Telegram
       if response.respond_to?(:class)
         info = { class: response.class.to_s }
         info[:original_type] = response.original_type if response.respond_to?(:original_type)
-        if response.respond_to?(:messages)
-          msgs = response.messages
-          info[:message_count] = msgs.respond_to?(:size) ? msgs.size : nil
-        elsif defined?(TD::Types::Unsupported) && response.is_a?(TD::Types::Unsupported)
-          raw_msgs = response.raw.is_a?(Hash) ? response.raw["messages"] : nil
-          info[:message_count] = raw_msgs.is_a?(Array) ? raw_msgs.size : nil
-        end
+        msgs = history_messages_from_response(response)
+        info[:message_count] = msgs.respond_to?(:size) ? msgs.size : nil
         return info
       end
 
       nil
     rescue StandardError
+      nil
+    end
+
+    def history_messages_from_response(response)
+      return nil if response.nil?
+
+      if response.respond_to?(:messages)
+        messages = response.messages
+        return messages if messages.respond_to?(:map)
+      end
+
+      if response.respond_to?(:original_type) && response.respond_to?(:raw)
+        raw = response.raw.is_a?(Hash) ? response.raw : {}
+        type = response.original_type.to_s
+        return raw["messages"] if %w[messages foundChatMessages].include?(type) && raw["messages"].is_a?(Array)
+      end
+
       nil
     end
 
