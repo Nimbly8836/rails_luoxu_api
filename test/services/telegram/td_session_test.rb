@@ -616,6 +616,35 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal "boot", captured[:reason]
   end
 
+  test "sync_messages_for_tracked_chats_async schedules known chat sync" do
+    session = build_session
+    captured = nil
+
+    session.define_singleton_method(:tracked_chat_ids) { [ 4, 9 ] }
+    session.define_singleton_method(:schedule_message_sync_locally) do |**kwargs|
+      captured = kwargs
+      {
+        enqueued: true,
+        status: "scheduled",
+        reason: kwargs[:reason].to_s,
+        chat_ids: kwargs[:chat_ids],
+        watched_chat_ids: kwargs[:use_watched_chat_ids],
+        wait_seconds: 5.0,
+        limit_per_chat: kwargs[:limit_per_chat]
+      }
+    end
+
+    result = session.sync_messages_for_tracked_chats_async(reason: "boot")
+
+    assert_equal true, result[:enqueued]
+    assert_equal "scheduled", result[:status]
+    assert_equal [ 4, 9 ], result[:chat_ids]
+    assert_equal false, result[:watched_chat_ids]
+    assert_equal [ 4, 9 ], captured[:chat_ids]
+    assert_equal false, captured[:use_watched_chat_ids]
+    assert_equal "boot", captured[:reason]
+  end
+
   test "sync_group_members_for_chats_async enqueues a group member sync job" do
     session = build_session
 
@@ -1213,7 +1242,7 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
   test "new poll message stores poll question as text and writes poll snapshot rows" do
     account = create_account
     session = build_session(account_id: account.id)
-    session.define_singleton_method(:watched_chat_id?) { |_chat_id| true }
+    session.define_singleton_method(:tracked_chat_id?) { |_chat_id| true }
     session.define_singleton_method(:persist_chat_history_frontier!) { |**| nil }
 
     message = {
@@ -1282,6 +1311,62 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     )
     assert_equal [ 1 ], state.chosen_option_indexes
     assert_equal true, state.has_voted
+  end
+
+  test "new poll message persists for chats with existing history even when not watched" do
+    account = create_account
+    TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_400,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_000),
+      message_id: 400,
+      text: "existing message"
+    )
+    session = build_session(account_id: account.id)
+    session.define_singleton_method(:persist_chat_history_frontier!) { |**| nil }
+
+    message = {
+      "id" => 300_000_000_456,
+      "chat_id" => -100123,
+      "date" => 1_700_000_100,
+      "sender_id" => {
+        "@type" => "messageSenderUser",
+        "user_id" => 42
+      },
+      "content" => {
+        "@type" => "messagePoll",
+        "poll" => {
+          "id" => "poll_for_existing_history",
+          "question" => "Recovered poll",
+          "is_anonymous" => false,
+          "allows_multiple_answers" => false,
+          "total_voter_count" => 3,
+          "is_closed" => false,
+          "options" => [
+            {
+              "text" => "Yes",
+              "voter_count" => 3,
+              "is_chosen" => true
+            }
+          ]
+        }
+      }
+    }
+
+    assert_difference("TelegramPoll.count", 1) do
+      assert_difference("TelegramAccountPollState.count", 1) do
+        session.send(:handle_new_message, message)
+      end
+    end
+
+    stored_message = TelegramMessage.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "Recovered poll", stored_message.text
   end
 
   test "extract_message_text returns poll question for poll messages" do

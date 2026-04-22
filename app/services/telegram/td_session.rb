@@ -58,11 +58,18 @@ module Telegram
       end
       return unless should_enqueue
 
-      sync_messages_for_watched_chats_async(reason: "boot")
+      sync_messages_for_tracked_chats_async(reason: "boot")
     end
 
     def sync_messages_for_watched_chats_async(reason: "manual")
       schedule_message_sync_async(use_watched_chat_ids: true, reason:)
+    end
+
+    def sync_messages_for_tracked_chats_async(reason: "manual")
+      ids = tracked_chat_ids
+      return { enqueued: false, status: "skipped", reason: "no_chat_ids" } if ids.empty?
+
+      schedule_message_sync_async(chat_ids: ids, reason:)
     end
 
     def sync_messages_for_chats_async(chat_ids:, limit_per_chat: nil, wait_seconds: nil, reason: "manual")
@@ -1696,7 +1703,7 @@ module Telegram
       return if bundle.nil?
 
       payload = bundle[:message]
-      return unless watched_chat_id?(payload[:td_chat_id])
+      return unless tracked_chat_id?(payload[:td_chat_id])
 
       persist_message_bundles([ bundle ])
       persist_chat_history_frontier!(
@@ -2044,6 +2051,20 @@ module Telegram
 
     def watched_chat_id?(chat_id)
       watched_chat_ids_lookup.key?(chat_id.to_i)
+    end
+
+    def tracked_chat_ids
+      ids = watched_chat_ids
+      ids |= TelegramMessage.where(telegram_account_id: @account_id).distinct.order(:td_chat_id).pluck(:td_chat_id).map(&:to_i)
+      ids.sort
+    end
+
+    def tracked_chat_id?(chat_id)
+      normalized_chat_id = chat_id.to_i
+      return false if normalized_chat_id.zero?
+      return true if watched_chat_id?(normalized_chat_id)
+
+      TelegramMessage.exists?(telegram_account_id: @account_id, td_chat_id: normalized_chat_id)
     end
 
     def watched_chat_ids_lookup

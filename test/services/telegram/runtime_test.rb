@@ -54,13 +54,13 @@ class TelegramRuntimeTest < ActiveSupport::TestCase
     FileUtils.rm_rf(uuid_root) if uuid_root.present?
   end
 
-  test "sync_enabled_accounts_messages_async schedules watched chat sync for enabled accounts only" do
+  test "sync_enabled_accounts_messages_async schedules tracked chat sync for enabled accounts only" do
     enabled_account = create_account(state: "ready", enabled: true)
     create_account(state: "ready", enabled: false)
 
     sync_calls = []
     fake_session = Object.new
-    fake_session.define_singleton_method(:sync_messages_for_watched_chats_async) do |reason:|
+    fake_session.define_singleton_method(:sync_messages_for_tracked_chats_async) do |reason:|
       sync_calls << reason
     end
 
