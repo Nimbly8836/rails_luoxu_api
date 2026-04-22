@@ -22,6 +22,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Normalize image names
+        id: image_names
+        shell: bash
+        run: |
+          echo "repository=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -36,7 +43,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/${{ steps.image_names.outputs.repository }}
           tags: |
             type=ref,event=tag
             type=sha,prefix=sha-
@@ -56,7 +63,7 @@ jobs:
           provenance: false
           sbom: false
           build-args: |
-            TDLIB_IMAGE=ghcr.io/${{ github.repository_owner }}/rails_luoxu_api-tdlib
+            TDLIB_IMAGE=ghcr.io/${{ steps.image_names.outputs.owner }}/rails_luoxu_api-tdlib
             TDLIB_IMAGE_TAG=${{ steps.tdlib.outputs.commit }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
