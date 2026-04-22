@@ -36,6 +36,12 @@ Rails.application.configure do
 
   # Change to "debug" to log everything (including potentially personally-identifiable information!)
   config.log_level = ENV.fetch("RAILS_LOG_LEVEL", "info")
+  config.active_record.verbose_query_logs = false
+  config.active_record.query_log_tags_enabled = false
+
+  unless ActiveModel::Type::Boolean.new.cast(ENV["RAILS_LOG_SQL"])
+    config.active_record.logger = nil
+  end
 
   # Prevent health checks from clogging up the logs.
   config.silence_healthcheck_path = "/up"

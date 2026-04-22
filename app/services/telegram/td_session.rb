@@ -509,7 +509,18 @@ module Telegram
         )
         pages += 1
         result[:batches] += 1
-        result[:fetched] += extract_history_count(response)
+        fetched_count = extract_history_count(response)
+        if fetched_count.zero?
+          response = fetch_search_messages_page(
+            chat_id:,
+            from_message_id:,
+            offset: 0,
+            limit: batch_limit,
+            retry_wait_seconds: delay
+          )
+          fetched_count = extract_history_count(response)
+        end
+        result[:fetched] += fetched_count
 
         message_bundles = extract_history_messages(response, resolve_sender_names: false)
         result[:parsed] += message_bundles.size

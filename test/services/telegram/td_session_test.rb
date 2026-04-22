@@ -364,6 +364,60 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     end
   end
 
+  test "backfill falls back to search when anchored history fetch returns empty" do
+    session = build_session
+    fetch_calls = []
+    search_calls = []
+    search_page = [
+      {
+        td_message_id: 900,
+        message: { td_chat_id: 123, message_id: 90, message_at: Time.current, text: "poll question" }
+      }
+    ]
+
+    session.define_singleton_method(:fetch_history_messages_page) do |chat_id:, from_message_id:, **|
+      fetch_calls << [ chat_id, from_message_id ]
+      :empty_page
+    end
+    session.define_singleton_method(:fetch_search_messages_page) do |chat_id:, from_message_id:, **|
+      search_calls << [ chat_id, from_message_id ]
+      search_calls.one? ? :search_page : :empty_search_page
+    end
+    session.define_singleton_method(:extract_history_count) do |response|
+      case response
+      when :search_page then 1
+      else 0
+      end
+    end
+    session.define_singleton_method(:extract_history_messages) do |response, **|
+      response == :search_page ? search_page : []
+    end
+    session.define_singleton_method(:persist_message_bundles) { |bundles| bundles.size }
+    session.define_singleton_method(:sleep) { |_seconds| nil }
+
+    result = session.send(
+      :backfill_older_messages_for_chat,
+      chat_id: 123,
+      existing_min_message_id: 100,
+      existing_min_td_message_id: 1_000,
+      per_chat_limit: nil,
+      batch_limit: 200,
+      delay: 0.25,
+      loaded_frontier: session.send(:default_history_frontier),
+      history_fetch_state: session.send(:default_history_fetch_state),
+      max_pages: 2
+    )
+
+    assert_equal [ [ 123, 1_000 ], [ 123, 900 ] ], fetch_calls
+    assert_equal [ [ 123, 1_000 ], [ 123, 900 ] ], search_calls
+    assert_equal 1, result[:upserted]
+    assert_equal 1, result[:fetched]
+    assert_equal 1, result[:parsed]
+    assert_equal true, result[:reached_start]
+    assert_equal 90, result[:new_min_message_id]
+    assert_equal 900, result[:new_min_td_message_id]
+  end
+
   test "full history seed reports continuation when page budget is reached" do
     session = build_session
     page = [
