@@ -356,9 +356,8 @@ module Telegram
                 message_bundles = message_bundles.first(remaining)
               end
 
-              upsert_usernames_from(message_bundles)
               message_attrs = message_bundles.map { |bundle| bundle[:message] }
-              upserted = upsert_messages_bulk(message_attrs)
+              upserted = persist_message_bundles(message_bundles)
               result[:upserted] += upserted
               chat_upserted += upserted
               merge_history_frontier!(loaded_frontier, message_attrs)
@@ -529,9 +528,8 @@ module Telegram
         end
 
         if insertable_bundles.any?
-          upsert_usernames_from(insertable_bundles)
           message_attrs = insertable_bundles.map { |bundle| bundle[:message] }
-          upserted = upsert_messages_bulk(message_attrs)
+          upserted = persist_message_bundles(insertable_bundles)
           result[:upserted] += upserted
           merge_history_frontier!(loaded_frontier, message_attrs)
 
@@ -1700,8 +1698,7 @@ module Telegram
       payload = bundle[:message]
       return unless watched_chat_id?(payload[:td_chat_id])
 
-      upsert_usernames_from([ bundle ])
-      upsert_messages_bulk([ payload ])
+      persist_message_bundles([ bundle ])
       persist_chat_history_frontier!(
         chat_id: payload[:td_chat_id],
         frontier: history_frontier_from_messages([ payload ])
@@ -1823,6 +1820,35 @@ module Telegram
       message_id = decode_message_id_from_td(td_message_id)
       poll_payload = payload["poll"]
       return nil if td_chat_id.zero? || td_message_id <= 0 || message_id.to_i <= 0
+      build_message_poll_snapshot_payload(
+        td_chat_id: td_chat_id,
+        td_message_id: td_message_id,
+        message_id: message_id.to_i,
+        poll_payload: poll_payload,
+        payload: payload
+      )
+    end
+
+    def parse_message_poll_snapshot_from_message(raw_message)
+      payload = message_to_hash(raw_message)
+      return nil unless payload.is_a?(Hash)
+
+      td_chat_id = payload["chat_id"].to_i
+      td_message_id = payload["id"].to_i
+      message_id = decode_message_id_from_td(td_message_id)
+      poll_payload = payload.dig("content", "poll")
+      return nil if td_chat_id.zero? || td_message_id <= 0 || message_id.to_i <= 0
+
+      build_message_poll_snapshot_payload(
+        td_chat_id: td_chat_id,
+        td_message_id: td_message_id,
+        message_id: message_id.to_i,
+        poll_payload: poll_payload,
+        payload: payload
+      )
+    end
+
+    def build_message_poll_snapshot_payload(td_chat_id:, td_message_id:, message_id:, poll_payload:, payload:)
       return nil unless poll_payload.is_a?(Hash)
 
       normalized_poll_payload = poll_payload.deep_stringify_keys
@@ -1835,7 +1861,7 @@ module Telegram
       {
         td_chat_id: td_chat_id,
         td_message_id: td_message_id,
-        message_id: message_id.to_i,
+        message_id: message_id,
         poll_id: poll_id,
         question: normalized_poll_payload["question"],
         is_anonymous: boolean_or_default(normalized_poll_payload["is_anonymous"], default: true),
@@ -2212,6 +2238,21 @@ module Telegram
       deduped_messages.size
     end
 
+    def persist_message_bundles(message_bundles)
+      return 0 if message_bundles.empty?
+
+      upserted = 0
+      TelegramMessage.transaction do
+        upsert_usernames_from(message_bundles)
+        message_attrs = message_bundles.map { |bundle| bundle[:message] }
+        upserted = upsert_messages_bulk(message_attrs)
+        message_bundles.each do |bundle|
+          upsert_message_poll_snapshot(bundle[:poll_snapshot]) if bundle[:poll_snapshot].present?
+        end
+      end
+      upserted
+    end
+
     def extract_message_bundle(message, resolve_sender_names: true)
       raw = message_to_hash(message)
       return nil unless raw.is_a?(Hash)
@@ -2239,7 +2280,8 @@ module Telegram
       {
         td_message_id: td_message_id.to_i,
         message: message_attrs,
-        username: build_username_attrs(message_attrs, sender_is_user:)
+        username: build_username_attrs(message_attrs, sender_is_user:),
+        poll_snapshot: parse_message_poll_snapshot_from_message(raw)
       }
     end
 
@@ -2549,6 +2591,8 @@ module Telegram
       case type
       when "messageText"
         content.dig("text", "text")
+      when "messagePoll"
+        content.dig("poll", "question")
       when "messagePhoto", "messageVideo", "messageDocument", "messageAnimation", "messageVoiceNote"
         content.dig("caption", "text")
       else

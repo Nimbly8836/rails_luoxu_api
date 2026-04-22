@@ -13,6 +13,9 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
   end
 
   teardown do
+    TelegramAccountPollState.delete_all
+    TelegramPollOption.delete_all
+    TelegramPoll.delete_all
     clear_enqueued_jobs
     clear_performed_jobs
     TelegramMessageHistory.delete_all
@@ -456,6 +459,99 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal "incremental", detail[:mode]
     assert_equal true, detail[:continuation_required]
     assert_equal "forward_page_budget_reached", detail[:continuation_reason]
+  end
+
+  test "sync_messages_for_chats backfills poll snapshots from historical poll messages" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    page = [
+      session.send(
+        :extract_message_bundle,
+        {
+          "id" => 300_000_000_456,
+          "chat_id" => -100123,
+          "date" => 1_700_000_000,
+          "sender_id" => {
+            "@type" => "messageSenderUser",
+            "user_id" => 42
+          },
+          "content" => {
+            "@type" => "messagePoll",
+            "poll" => {
+              "id" => "history_poll_123",
+              "question" => "Historical poll",
+              "is_anonymous" => false,
+              "allows_multiple_answers" => true,
+              "total_voter_count" => 7,
+              "is_closed" => false,
+              "options" => [
+                {
+                  "text" => "A",
+                  "voter_count" => 3,
+                  "is_chosen" => false
+                },
+                {
+                  "text" => "B",
+                  "voter_count" => 4,
+                  "is_chosen" => true
+                }
+              ]
+            }
+          }
+        },
+        resolve_sender_names: false
+      )
+    ]
+
+    session.define_singleton_method(:with_operation_lock) { |_kwargs = nil, **, &block| block.call }
+    session.define_singleton_method(:raise_if_disposed!) { nil }
+    session.define_singleton_method(:wait_until_ready!) { nil }
+    session.define_singleton_method(:history_sync_state_lookup) do |_ids|
+      { -100123 => send(:default_history_sync_state) }
+    end
+    session.define_singleton_method(:precheck_history_sync_chat) do |chat_id:, **|
+      { chat_title: "chat-#{chat_id}", last_message_id: 300_000_000_456, precheck_error: nil }
+    end
+    session.define_singleton_method(:supports_chat_history_frontier?) { false }
+    session.define_singleton_method(:fetch_history_messages_page) { |_kwargs = nil, **| :page }
+    session.define_singleton_method(:extract_history_count) { |_response| page.present? ? 1 : 0 }
+    session.define_singleton_method(:describe_response) { |_response| { class: "TestResponse", message_count: 1 } }
+    session.define_singleton_method(:extract_history_messages) { |_response, **| page.tap { page = [] } }
+    session.define_singleton_method(:persist_chat_history_frontier!) { |**| nil }
+    session.define_singleton_method(:sleep) { |_seconds| nil }
+
+    assert_difference("TelegramMessage.count", 1) do
+      assert_difference("TelegramPoll.count", 1) do
+        assert_difference("TelegramPollOption.count", 2) do
+          assert_difference("TelegramAccountPollState.count", 1) do
+            result = session.sync_messages_for_chats(chat_ids: [ -100123 ], limit_per_chat: nil, wait_seconds: nil)
+            assert_equal 1, result[:upserted]
+          end
+        end
+      end
+    end
+
+    message = TelegramMessage.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "Historical poll", message.text
+
+    poll = TelegramPoll.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "history_poll_123", poll.poll_id
+    assert_equal "Historical poll", poll.question
+
+    state = TelegramAccountPollState.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal [ 1 ], state.chosen_option_indexes
   end
 
   test "sync_messages_for_chats_async schedules local message sync" do
@@ -1112,6 +1208,98 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal 0, TelegramPollOption.count
     assert_equal 0, TelegramAccountPollState.where(telegram_account_id: account.id).count
     assert_equal 0, TelegramMessageHistory.where(telegram_account_id: account.id).count
+  end
+
+  test "new poll message stores poll question as text and writes poll snapshot rows" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    session.define_singleton_method(:watched_chat_id?) { |_chat_id| true }
+    session.define_singleton_method(:persist_chat_history_frontier!) { |**| nil }
+
+    message = {
+      "id" => 300_000_000_456,
+      "chat_id" => -100123,
+      "date" => 1_700_000_000,
+      "sender_id" => {
+        "@type" => "messageSenderUser",
+        "user_id" => 42
+      },
+      "content" => {
+        "@type" => "messagePoll",
+        "poll" => {
+          "id" => "poll_from_new_message",
+          "question" => "Pick a letter",
+          "is_anonymous" => false,
+          "allows_multiple_answers" => true,
+          "total_voter_count" => 7,
+          "is_closed" => false,
+          "options" => [
+            {
+              "text" => "A",
+              "voter_count" => 3,
+              "is_chosen" => false
+            },
+            {
+              "text" => "B",
+              "voter_count" => 4,
+              "is_chosen" => true
+            }
+          ]
+        }
+      }
+    }
+
+    assert_difference("TelegramMessage.count", 1) do
+      assert_difference("TelegramPoll.count", 1) do
+        assert_difference("TelegramPollOption.count", 2) do
+          assert_difference("TelegramAccountPollState.count", 1) do
+            session.send(:handle_new_message, message)
+          end
+        end
+      end
+    end
+
+    stored_message = TelegramMessage.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "Pick a letter", stored_message.text
+
+    poll = TelegramPoll.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "poll_from_new_message", poll.poll_id
+    assert_equal "Pick a letter", poll.question
+    assert_equal [ "A", "B" ], poll.telegram_poll_options.order(:option_index).map(&:text)
+
+    state = TelegramAccountPollState.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal [ 1 ], state.chosen_option_indexes
+    assert_equal true, state.has_voted
+  end
+
+  test "extract_message_text returns poll question for poll messages" do
+    session = build_session
+
+    text = session.send(
+      :extract_message_text,
+      {
+        "content" => {
+          "@type" => "messagePoll",
+          "poll" => {
+            "question" => "Poll title"
+          }
+        }
+      }
+    )
+
+    assert_equal "Poll title", text
   end
 
   private
