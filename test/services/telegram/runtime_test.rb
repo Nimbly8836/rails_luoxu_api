@@ -76,6 +76,57 @@ class TelegramRuntimeTest < ActiveSupport::TestCase
     FileUtils.rm_rf(File.dirname(enabled_account.database_directory)) if enabled_account
   end
 
+  test "backfill_poll_messages repairs candidate chats with null message text by default" do
+    account = create_account(state: "ready", enabled: true)
+    TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_456,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_000),
+      message_id: 456,
+      text: nil
+    )
+    TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100456,
+      td_message_id: 300_000_000_789,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_100),
+      message_id: 789,
+      text: "already healthy"
+    )
+
+    sync_calls = []
+    fake_session = Object.new
+    fake_session.define_singleton_method(:sync_messages_for_chats) do |**kwargs|
+      sync_calls << kwargs
+      {
+        chats: kwargs[:chat_ids].size,
+        upserted: 1,
+        failed: 0,
+        errors: [],
+        details: kwargs[:chat_ids].map { |chat_id| { chat_id: chat_id } }
+      }
+    end
+
+    Telegram::Runtime.stub(:fetch, nil) do
+      Telegram::Runtime.stub(:start, fake_session) do
+        result = Telegram::Runtime.backfill_poll_messages!(account_uuid: account.uuid)
+
+        assert_equal [ -100123 ], result[:target_chat_ids]
+      end
+    end
+
+    assert_equal 1, sync_calls.size
+    assert_equal [ -100123 ], sync_calls.first[:chat_ids]
+    assert_equal true, sync_calls.first[:repair_existing]
+    assert_nil sync_calls.first[:limit_per_chat]
+    assert_nil sync_calls.first[:wait_seconds]
+  ensure
+    FileUtils.rm_rf(File.dirname(account.database_directory)) if account
+  end
+
   private
 
   def create_account(state:, **attrs)

@@ -644,6 +644,123 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal [ 1 ], state.chosen_option_indexes
   end
 
+  test "sync_messages_for_chats can repair existing poll messages when requested" do
+    account = create_account
+    TelegramMessage.create!(
+      telegram_account: account,
+      td_chat_id: -100123,
+      td_message_id: 300_000_000_456,
+      td_sender_id: 42,
+      message_at: Time.at(1_700_000_000),
+      message_id: 456,
+      text: nil
+    )
+
+    session = build_session(account_id: account.id)
+    page = [
+      session.send(
+        :extract_message_bundle,
+        {
+          "id" => 300_000_000_456,
+          "chat_id" => -100123,
+          "date" => 1_700_000_000,
+          "sender_id" => {
+            "@type" => "messageSenderUser",
+            "user_id" => 42
+          },
+          "content" => {
+            "@type" => "messagePoll",
+            "poll" => {
+              "id" => "repair_poll_123",
+              "question" => "Repair this poll",
+              "is_anonymous" => false,
+              "allows_multiple_answers" => true,
+              "total_voter_count" => 7,
+              "is_closed" => false,
+              "options" => [
+                {
+                  "text" => "A",
+                  "voter_count" => 3,
+                  "is_chosen" => false
+                },
+                {
+                  "text" => "B",
+                  "voter_count" => 4,
+                  "is_chosen" => true
+                }
+              ]
+            }
+          }
+        },
+        resolve_sender_names: false
+      )
+    ]
+
+    session.define_singleton_method(:with_operation_lock) { |_kwargs = nil, **, &block| block.call }
+    session.define_singleton_method(:raise_if_disposed!) { nil }
+    session.define_singleton_method(:wait_until_ready!) { nil }
+    session.define_singleton_method(:history_sync_state_lookup) do |_ids|
+      {
+        -100123 => send(:default_history_sync_state).merge(
+          chat_known_to_account: true,
+          chat_title: "chat--100123",
+          existing_max_message_id: 456,
+          existing_min_message_id: 456,
+          existing_max_td_message_id: 300_000_000_456,
+          existing_min_td_message_id: 300_000_000_456
+        )
+      }
+    end
+    session.define_singleton_method(:precheck_history_sync_chat) do |chat_id:, **|
+      { chat_title: "chat-#{chat_id}", last_message_id: 300_000_000_456, precheck_error: nil }
+    end
+    session.define_singleton_method(:supports_chat_history_frontier?) { false }
+    session.define_singleton_method(:fetch_history_messages_page) { |_kwargs = nil, **| :page }
+    session.define_singleton_method(:extract_history_count) { |_response| page.present? ? 1 : 0 }
+    session.define_singleton_method(:describe_response) { |_response| { class: "TestResponse", message_count: 1 } }
+    session.define_singleton_method(:extract_history_messages) { |_response, **| page.tap { page = [] } }
+    session.define_singleton_method(:persist_chat_history_frontier!) { |**| nil }
+    session.define_singleton_method(:sleep) { |_seconds| nil }
+
+    assert_no_difference("TelegramMessage.count") do
+      assert_difference("TelegramPoll.count", 1) do
+        assert_difference("TelegramPollOption.count", 2) do
+          assert_difference("TelegramAccountPollState.count", 1) do
+            result = session.sync_messages_for_chats(
+              chat_ids: [ -100123 ],
+              limit_per_chat: nil,
+              wait_seconds: nil,
+              repair_existing: true
+            )
+            assert_equal 1, result[:upserted]
+          end
+        end
+      end
+    end
+
+    message = TelegramMessage.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "Repair this poll", message.text
+
+    poll = TelegramPoll.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "repair_poll_123", poll.poll_id
+    assert_equal "Repair this poll", poll.question
+
+    state = TelegramAccountPollState.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal [ 1 ], state.chosen_option_indexes
+  end
+
   test "sync_messages_for_chats_async schedules local message sync" do
     session = build_session
     captured = nil
@@ -1457,6 +1574,103 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
       message_id: 456
     )
     assert_equal "Recovered poll", stored_message.text
+  end
+
+  test "new poll message normalizes nested to_h payloads before persisting poll data" do
+    account = create_account
+    session = build_session(account_id: account.id)
+    session.define_singleton_method(:tracked_chat_id?) { |_chat_id| true }
+    session.define_singleton_method(:persist_chat_history_frontier!) { |**| nil }
+
+    option_a = Struct.new(:payload) do
+      def to_h
+        payload
+      end
+    end.new(
+      {
+        text: "A",
+        voter_count: 3,
+        is_chosen: false
+      }
+    )
+    option_b = Struct.new(:payload) do
+      def to_h
+        payload
+      end
+    end.new(
+      {
+        text: "B",
+        voter_count: 4,
+        is_chosen: true
+      }
+    )
+    poll = Struct.new(:payload) do
+      def to_h
+        payload
+      end
+    end.new(
+      {
+        id: "poll_from_nested_objects",
+        question: "Nested poll",
+        is_anonymous: false,
+        allows_multiple_answers: true,
+        total_voter_count: 7,
+        is_closed: false,
+        options: [ option_a, option_b ]
+      }
+    )
+    content = Struct.new(:payload) do
+      def to_h
+        payload
+      end
+    end.new(
+      {
+        "@type": "messagePoll",
+        poll:
+      }
+    )
+    message = Struct.new(:payload) do
+      def to_h
+        payload
+      end
+    end.new(
+      {
+        id: 300_000_000_456,
+        chat_id: -100123,
+        date: 1_700_000_000,
+        sender_id: {
+          "@type": "messageSenderUser",
+          user_id: 42
+        },
+        content:
+      }
+    )
+
+    assert_difference("TelegramMessage.count", 1) do
+      assert_difference("TelegramPoll.count", 1) do
+        assert_difference("TelegramPollOption.count", 2) do
+          assert_difference("TelegramAccountPollState.count", 1) do
+            session.send(:handle_new_message, message)
+          end
+        end
+      end
+    end
+
+    stored_message = TelegramMessage.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "Nested poll", stored_message.text
+
+    poll_record = TelegramPoll.find_by!(
+      telegram_account_id: account.id,
+      td_chat_id: -100123,
+      message_id: 456
+    )
+    assert_equal "poll_from_nested_objects", poll_record.poll_id
+    assert_equal "Nested poll", poll_record.question
+    assert_equal [ "A", "B" ], poll_record.telegram_poll_options.order(:option_index).map(&:text)
   end
 
   test "extract_message_text returns poll question for poll messages" do

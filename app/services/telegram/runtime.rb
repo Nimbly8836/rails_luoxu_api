@@ -100,6 +100,32 @@ module Telegram
         synced
       end
 
+      def backfill_poll_messages!(account_uuid:, chat_ids: nil, limit_per_chat: nil, wait_seconds: nil, all_tracked: false)
+        account = TelegramAccount.find_by!(uuid: account_uuid)
+        ids = normalize_backfill_chat_ids(chat_ids)
+        ids = candidate_backfill_chat_ids_for(account, all_tracked:) if ids.empty?
+
+        return {
+          chats: 0,
+          upserted: 0,
+          failed: 0,
+          errors: [],
+          details: [],
+          target_chat_ids: [],
+          skipped: true,
+          reason: "no_candidate_chats"
+        } if ids.empty?
+
+        session = fetch(account.uuid) || start(account)
+        result = session.sync_messages_for_chats(
+          chat_ids: ids,
+          limit_per_chat: normalize_backfill_limit(limit_per_chat),
+          wait_seconds: normalize_backfill_wait(wait_seconds),
+          repair_existing: true
+        )
+        result.merge(target_chat_ids: ids)
+      end
+
       def delete_account!(account, reason: "manual_purge")
         destroy_account!(account, reason:, force: true)
       end
@@ -156,6 +182,28 @@ module Telegram
         ttl_minutes = ENV.fetch("TELEGRAM_TRANSIENT_SESSION_TTL_MINUTES", "30").to_i
         ttl_minutes = 1 if ttl_minutes < 1
         ttl_minutes.minutes.ago
+      end
+
+      def normalize_backfill_chat_ids(chat_ids)
+        Array(chat_ids).flat_map { |value| value.to_s.split(",") }.map(&:strip).reject(&:blank?).map(&:to_i).select(&:nonzero?).uniq.sort
+      end
+
+      def candidate_backfill_chat_ids_for(account, all_tracked:)
+        scope = account.telegram_messages
+        scope = scope.where(text: nil) unless all_tracked
+        scope.distinct.order(:td_chat_id).pluck(:td_chat_id).map(&:to_i).select(&:nonzero?)
+      end
+
+      def normalize_backfill_limit(limit_per_chat)
+        value = limit_per_chat.present? ? limit_per_chat.to_i : nil
+        value&.positive? ? value : nil
+      end
+
+      def normalize_backfill_wait(wait_seconds)
+        return nil unless wait_seconds.present?
+
+        value = wait_seconds.to_f
+        value.negative? ? 0.0 : value
       end
 
       def telegram_accounts_table_exists?

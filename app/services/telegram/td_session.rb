@@ -233,7 +233,7 @@ module Telegram
       raise InvalidStateError, "Session state is #{state}"
     end
 
-    def sync_messages_for_chats(chat_ids:, limit_per_chat: nil, wait_seconds: nil, forward_max_pages: nil, backfill_max_pages: nil)
+    def sync_messages_for_chats(chat_ids:, limit_per_chat: nil, wait_seconds: nil, forward_max_pages: nil, backfill_max_pages: nil, repair_existing: false)
       with_operation_lock do
         raise_if_disposed!
         wait_until_ready!
@@ -261,9 +261,14 @@ module Telegram
           precheck_error = nil
           first_response_info = nil
 
-          history_seed_required = existing_max_message_id <= 0 && existing_max_td_message_id <= 0
-          history_backfill_only = !history_seed_required &&
+          history_seed_required = repair_existing || (existing_max_message_id <= 0 && existing_max_td_message_id <= 0)
+          history_backfill_only = !repair_existing && !history_seed_required &&
             history_backfill_required?(existing_min_message_id:, existing_min_td_message_id:)
+
+          if repair_existing
+            existing_max_message_id = 0
+            existing_max_td_message_id = 0
+          end
 
           precheck = precheck_history_sync_chat(
             chat_id:,
@@ -285,7 +290,9 @@ module Telegram
           chat_parsed = 0
           batches = 0
           history_fetch_state = default_history_fetch_state
-          mode = if history_backfill_only
+          mode = if repair_existing
+                   "repair_full_history"
+          elsif history_backfill_only
                    "backfill"
           elsif history_seed_required
                    "full_history"
@@ -377,7 +384,8 @@ module Telegram
                 history_seed_required:,
                 per_chat_limit:,
                 batches:,
-                forward_max_pages:
+                forward_max_pages:,
+                bypass_page_budget: repair_existing
               )
                 continuation_required = true
                 continuation_reason = history_seed_required ? "seed_page_budget_reached" : "forward_page_budget_reached"
@@ -595,8 +603,9 @@ module Telegram
       true
     end
 
-    def history_forward_page_budget_reached?(history_seed_required:, per_chat_limit:, batches:, forward_max_pages: nil)
+    def history_forward_page_budget_reached?(history_seed_required:, per_chat_limit:, batches:, forward_max_pages: nil, bypass_page_budget: false)
       return false if per_chat_limit.present?
+      return false if bypass_page_budget
 
       budget =
         if forward_max_pages.present?
@@ -2053,7 +2062,8 @@ module Telegram
     end
 
     def normalize_unsupported_update_payload(payload)
-      payload.is_a?(Hash) ? payload.deep_stringify_keys : {}
+      normalized_payload = normalize_td_payload(payload)
+      normalized_payload.is_a?(Hash) ? normalized_payload : {}
     end
 
     def watched_chat_ids
@@ -2595,23 +2605,45 @@ module Telegram
 
     def message_to_hash(message)
       if message.is_a?(Hash)
-        return message.deep_stringify_keys
+        return normalize_td_payload(message)
       end
 
       if defined?(TD::Types::Unsupported) && message.is_a?(TD::Types::Unsupported)
         raw = message.raw
-        return raw.deep_stringify_keys if raw.is_a?(Hash)
+        return normalize_td_payload(raw) if raw.is_a?(Hash)
         return nil
       end
 
       if message.respond_to?(:to_h)
         raw = message.to_h
-        return raw.deep_stringify_keys if raw.is_a?(Hash)
+        return normalize_td_payload(raw) if raw.is_a?(Hash)
       end
 
       nil
     rescue StandardError
       nil
+    end
+
+    def normalize_td_payload(value)
+      case value
+      when Hash
+        value.each_with_object({}) do |(key, nested_value), normalized_hash|
+          normalized_hash[key.to_s] = normalize_td_payload(nested_value)
+        end
+      when Array
+        value.map { |item| normalize_td_payload(item) }
+      else
+        if defined?(TD::Types::Unsupported) && value.is_a?(TD::Types::Unsupported)
+          normalize_td_payload(value.raw)
+        elsif value.respond_to?(:to_h)
+          normalized_value = value.to_h
+          normalize_td_payload(normalized_value)
+        else
+          value
+        end
+      end
+    rescue StandardError
+      value
     end
 
     def extract_message_text(raw)
