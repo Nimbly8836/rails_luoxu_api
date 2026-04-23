@@ -1890,7 +1890,7 @@ module Telegram
         td_message_id: td_message_id,
         message_id: message_id,
         poll_id: poll_id,
-        question: normalized_poll_payload["question"],
+        question: extract_formatted_text_text(normalized_poll_payload["question"]),
         is_anonymous: boolean_or_default(normalized_poll_payload["is_anonymous"], default: true),
         allows_multiple_answers: boolean_or_default(normalized_poll_payload["allows_multiple_answers"], default: false),
         total_voter_count: normalized_poll_payload["total_voter_count"].to_i,
@@ -1923,7 +1923,7 @@ module Telegram
       return nil unless option.is_a?(Hash)
 
       normalized_option = option.deep_stringify_keys
-      text = normalized_option["text"]
+      text = extract_formatted_text_text(normalized_option["text"])
       voter_count = strict_integer_value(normalized_option["voter_count"])
       is_chosen = strict_boolean_value(normalized_option["is_chosen"])
       return nil unless text.is_a?(String) && text.present?
@@ -2654,12 +2654,29 @@ module Telegram
       when "messageText"
         content.dig("text", "text")
       when "messagePoll"
-        content.dig("poll", "question")
+        extract_formatted_text_text(content.dig("poll", "question"))
       when "messagePhoto", "messageVideo", "messageDocument", "messageAnimation", "messageVoiceNote"
         content.dig("caption", "text")
       else
         content.dig("text", "text") || content.dig("caption", "text")
       end
+    end
+
+    def extract_formatted_text_text(value)
+      case value
+      when String
+        value
+      when Hash
+        normalized_value = value.deep_stringify_keys
+        text = normalized_value["text"]
+        text if text.is_a?(String)
+      else
+        if value.respond_to?(:text)
+          extract_formatted_text_text(value.text)
+        end
+      end
+    rescue StandardError
+      nil
     end
 
     def extract_chat_ids(chats_result)

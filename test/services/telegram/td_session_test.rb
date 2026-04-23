@@ -672,19 +672,28 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
             "@type" => "messagePoll",
             "poll" => {
               "id" => "repair_poll_123",
-              "question" => "Repair this poll",
+              "question" => {
+                "text" => "Repair this poll",
+                "entities" => []
+              },
               "is_anonymous" => false,
               "allows_multiple_answers" => true,
               "total_voter_count" => 7,
               "is_closed" => false,
               "options" => [
                 {
-                  "text" => "A",
+                  "text" => {
+                    "text" => "A",
+                    "entities" => []
+                  },
                   "voter_count" => 3,
                   "is_chosen" => false
                 },
                 {
-                  "text" => "B",
+                  "text" => {
+                    "text" => "B",
+                    "entities" => []
+                  },
                   "voter_count" => 4,
                   "is_chosen" => true
                 }
