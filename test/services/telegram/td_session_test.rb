@@ -803,6 +803,33 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     assert_equal "manual", captured[:reason]
   end
 
+  test "sync_messages_for_chats_async forwards repair_existing to local scheduler" do
+    session = build_session
+    captured = nil
+
+    session.define_singleton_method(:schedule_message_sync_locally) do |**kwargs|
+      captured = kwargs
+      {
+        enqueued: true,
+        status: "scheduled",
+        reason: kwargs[:reason].to_s,
+        chat_ids: kwargs[:chat_ids],
+        watched_chat_ids: kwargs[:use_watched_chat_ids],
+        wait_seconds: 5.0,
+        limit_per_chat: kwargs[:limit_per_chat],
+        repair_existing: kwargs[:repair_existing]
+      }
+    end
+
+    result = session.sync_messages_for_chats_async(chat_ids: [ 7 ], reason: "repair", repair_existing: true)
+
+    assert_equal true, result[:enqueued]
+    assert_equal "scheduled", result[:status]
+    assert_equal true, result[:repair_existing]
+    assert_equal true, captured[:repair_existing]
+    assert_equal "repair", captured[:reason]
+  end
+
   test "sync_messages_for_chats_async schedules watched chat sync" do
     session = build_session
     captured = nil

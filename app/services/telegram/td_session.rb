@@ -72,12 +72,13 @@ module Telegram
       schedule_message_sync_async(chat_ids: ids, reason:)
     end
 
-    def sync_messages_for_chats_async(chat_ids:, limit_per_chat: nil, wait_seconds: nil, reason: "manual")
+    def sync_messages_for_chats_async(chat_ids:, limit_per_chat: nil, wait_seconds: nil, reason: "manual", repair_existing: false)
       schedule_message_sync_async(
         chat_ids:,
         limit_per_chat:,
         wait_seconds:,
-        reason:
+        reason:,
+        repair_existing:
       )
     end
 
@@ -670,14 +671,15 @@ module Telegram
 
     private
 
-    def schedule_message_sync_async(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:)
+    def schedule_message_sync_async(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:, repair_existing: false)
       if in_process_message_sync?
         schedule_message_sync_locally(
           chat_ids:,
           use_watched_chat_ids:,
           limit_per_chat:,
           wait_seconds:,
-          reason:
+          reason:,
+          repair_existing:
         )
       else
         enqueue_message_sync_job(
@@ -685,12 +687,13 @@ module Telegram
           use_watched_chat_ids:,
           limit_per_chat:,
           wait_seconds:,
-          reason:
+          reason:,
+          repair_existing:
         )
       end
     end
 
-    def schedule_message_sync_locally(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:)
+    def schedule_message_sync_locally(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:, repair_existing: false)
       raise_if_disposed!
 
       ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq.sort
@@ -706,7 +709,12 @@ module Telegram
         wait_seconds: normalized_wait,
         reason: reason.to_s,
         retry_attempt: 0,
-        next_run_at: monotonic_now
+        next_run_at: monotonic_now,
+        repair_existing: repair_existing
+      )
+      Rails.logger.info(
+        "Scheduled in-process message sync for account #{@id} chats=#{ids.inspect} reason=#{reason} " \
+        "wait_seconds=#{normalized_wait} limit_per_chat=#{normalized_limit.inspect} repair_existing=#{repair_existing}"
       )
 
       {
@@ -716,7 +724,8 @@ module Telegram
         chat_ids: ids,
         watched_chat_ids: use_watched_chat_ids,
         wait_seconds: normalized_wait,
-        limit_per_chat: normalized_limit
+        limit_per_chat: normalized_limit,
+        repair_existing: repair_existing
       }
     end
 
@@ -732,6 +741,7 @@ module Telegram
           Thread.current.report_on_exception = false if Thread.current.respond_to?(:report_on_exception=)
           message_sync_scheduler_loop
         end
+        Rails.logger.info("Started message sync scheduler for account #{@id}")
       end
     end
 
@@ -798,12 +808,18 @@ module Telegram
 
     def process_scheduled_message_sync(entry)
       chat_id = entry[:chat_id].to_i
+      Rails.logger.info(
+        "Starting in-process message sync for account #{@id} chat=#{chat_id} reason=#{entry[:reason]} " \
+        "retry_attempt=#{entry[:retry_attempt]} session_state=#{@mutex.synchronize { @state }} " \
+        "repair_existing=#{entry[:repair_existing]}"
+      )
       sync = sync_messages_for_chats(
         chat_ids: [ chat_id ],
         limit_per_chat: entry[:limit_per_chat],
         wait_seconds: entry[:wait_seconds],
         forward_max_pages: scheduler_forward_max_pages,
-        backfill_max_pages: scheduler_backfill_max_pages
+        backfill_max_pages: scheduler_backfill_max_pages,
+        repair_existing: entry[:repair_existing]
       )
       Rails.logger.info(
         "In-process message sync for account #{@id} chat=#{chat_id} reason=#{entry[:reason]} " \
@@ -839,7 +855,8 @@ module Telegram
         reason: next_reason,
         retry_attempt: 0,
         continuation_reason: continuation_reason,
-        next_run_at: monotonic_now + scheduler_continuation_delay_seconds
+        next_run_at: monotonic_now + scheduler_continuation_delay_seconds,
+        repair_existing: entry[:repair_existing]
       )
     end
 
@@ -859,11 +876,12 @@ module Telegram
         wait_seconds: scheduler_next_wait_seconds_for(entry[:wait_seconds]),
         reason: "#{entry[:reason]}:retry#{retry_attempt}",
         retry_attempt: retry_attempt,
-        next_run_at: monotonic_now + scheduler_retry_delay_seconds_for(retry_attempt)
+        next_run_at: monotonic_now + scheduler_retry_delay_seconds_for(retry_attempt),
+        repair_existing: entry[:repair_existing]
       )
     end
 
-    def schedule_local_message_sync_entries(chat_ids:, limit_per_chat:, wait_seconds:, reason:, retry_attempt:, next_run_at:, continuation_reason: nil)
+    def schedule_local_message_sync_entries(chat_ids:, limit_per_chat:, wait_seconds:, reason:, retry_attempt:, next_run_at:, continuation_reason: nil, repair_existing: false)
       ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq.sort
       return [] if ids.empty?
 
@@ -877,6 +895,8 @@ module Telegram
           preserve_existing = existing &&
             existing[:priority].to_i <= next_priority &&
             existing[:next_run_at].to_f <= next_run_at.to_f
+          next_repair_existing = ActiveModel::Type::Boolean.new.cast(existing&.dig(:repair_existing)) ||
+            ActiveModel::Type::Boolean.new.cast(repair_existing)
           @scheduled_message_syncs[chat_id] = {
             chat_id: chat_id,
             limit_per_chat: limit_per_chat.nil? ? existing&.dig(:limit_per_chat) : limit_per_chat,
@@ -886,7 +906,8 @@ module Telegram
             continuation_reason: preserve_existing ? existing[:continuation_reason] : continuation_reason,
             priority: existing ? [ existing[:priority].to_i, next_priority ].min : next_priority,
             next_run_at: existing ? [ existing[:next_run_at].to_f, next_run_at.to_f ].min : next_run_at.to_f,
-            sequence: sequence
+            sequence: sequence,
+            repair_existing: next_repair_existing
           }
         end
         @message_sync_scheduler_cv.broadcast
@@ -951,7 +972,7 @@ module Telegram
       ENV.fetch("TELEGRAM_MESSAGE_SYNC_JOB_RETRY_ATTEMPTS", "12").to_i.clamp(1, 100)
     end
 
-    def enqueue_message_sync_job(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:)
+    def enqueue_message_sync_job(chat_ids: nil, use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason:, repair_existing: false)
       ids = Array(chat_ids).map(&:to_i).uniq.sort
       return { enqueued: false, status: "skipped", reason: "no_chat_ids" } if !use_watched_chat_ids && ids.empty?
 
@@ -964,7 +985,8 @@ module Telegram
         limit_per_chat: normalized_limit,
         wait_seconds: normalized_wait,
         reason: reason.to_s,
-        retry_attempt: 0
+        retry_attempt: 0,
+        repair_existing: repair_existing
       )
 
       {
@@ -975,7 +997,8 @@ module Telegram
         chat_ids: ids,
         watched_chat_ids: use_watched_chat_ids,
         wait_seconds: normalized_wait,
-        limit_per_chat: normalized_limit
+        limit_per_chat: normalized_limit,
+        repair_existing: repair_existing
       }
     end
 

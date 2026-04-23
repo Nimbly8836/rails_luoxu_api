@@ -153,6 +153,35 @@ class TelegramMessageSyncJobTest < ActiveSupport::TestCase
     assert_in_delta 1.5.seconds.from_now.to_f, job[:at], 3.0
   end
 
+  test "perform forwards repair_existing to session sync and continuation jobs" do
+    account = create_account
+    calls = []
+    session = build_session do |chat_ids:, limit_per_chat:, wait_seconds:, repair_existing:|
+      calls << [ chat_ids, limit_per_chat, wait_seconds, repair_existing ]
+      {
+        failed: 0,
+        errors: [],
+        details: [ { chat_id: 4, continuation_required: true } ]
+      }
+    end
+
+    with_runtime_session(account, session) do
+      Telegram::MessageSyncJob.perform_now(
+        account_uuid: account.uuid,
+        chat_ids: [ 4 ],
+        limit_per_chat: nil,
+        wait_seconds: nil,
+        reason: "manual",
+        retry_attempt: 0,
+        repair_existing: true
+      )
+    end
+
+    assert_equal [ [ [ 4 ], nil, 5.0, true ] ], calls
+    assert_equal 1, enqueued_jobs.size
+    assert_equal true, enqueued_jobs.last[:args].first["repair_existing"]
+  end
+
   test "perform does not enqueue continuation for failed chats" do
     account = create_account
     session = build_session do |chat_ids:, **|

@@ -14,7 +14,7 @@ module Telegram
 
     retry_on Telegram::TdSession::InvalidStateError, wait: :polynomially_longer, attempts: 15
 
-    def perform(account_uuid:, chat_ids: [], use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason: "manual", retry_attempt: 0)
+    def perform(account_uuid:, chat_ids: [], use_watched_chat_ids: false, limit_per_chat: nil, wait_seconds: nil, reason: "manual", retry_attempt: 0, repair_existing: false)
       account = TelegramAccount.find_by(uuid: account_uuid)
       return if account.nil? || !account.enabled?
 
@@ -37,7 +37,8 @@ module Telegram
           limit_per_chat: normalized_limit_per_chat,
           wait_seconds: normalized_wait_seconds,
           reason: reason,
-          retry_attempt: retry_attempt
+          retry_attempt: retry_attempt,
+          repair_existing: repair_existing
         )
         Rails.logger.info(
           "Fanned out message sync for account #{account.uuid} reason=#{reason} retry_attempt=#{retry_attempt} " \
@@ -49,7 +50,8 @@ module Telegram
       sync = session.sync_messages_for_chats(
         chat_ids: ids,
         limit_per_chat: normalized_limit_per_chat,
-        wait_seconds: normalized_wait_seconds
+        wait_seconds: normalized_wait_seconds,
+        repair_existing: repair_existing
       )
       Rails.logger.info(
         "Message sync job for account #{account.uuid} reason=#{reason} retry_attempt=#{retry_attempt}: #{sync.inspect}"
@@ -62,7 +64,8 @@ module Telegram
         chat_ids: continuation_chat_ids,
         limit_per_chat: normalized_limit_per_chat,
         wait_seconds: normalized_wait_seconds,
-        reason:
+        reason:,
+        repair_existing:
       )
       return if failed_chat_ids.empty?
 
@@ -83,6 +86,7 @@ module Telegram
         wait_seconds: next_wait_seconds,
         reason: "#{reason}:retry#{next_retry_attempt}",
         retry_attempt: next_retry_attempt,
+        repair_existing: repair_existing,
         wait: retry_delay_seconds.seconds
       )
       Rails.logger.warn(
@@ -137,7 +141,7 @@ module Telegram
       ids.select(&:nonzero?).uniq.sort
     end
 
-    def enqueue_continuation_job(account:, chat_ids:, limit_per_chat:, wait_seconds:, reason:)
+    def enqueue_continuation_job(account:, chat_ids:, limit_per_chat:, wait_seconds:, reason:, repair_existing:)
       ids = normalize_chat_ids(chat_ids)
       return if ids.empty?
 
@@ -150,6 +154,7 @@ module Telegram
         wait_seconds: wait_seconds,
         reason: next_reason,
         retry_attempt: 0,
+        repair_existing: repair_existing,
         wait: wait_seconds_for_job.seconds
       )
       Rails.logger.info(
@@ -158,7 +163,7 @@ module Telegram
       )
     end
 
-    def enqueue_chat_jobs(account_uuid:, chat_ids:, limit_per_chat:, wait_seconds:, reason:, retry_attempt:, wait: nil)
+    def enqueue_chat_jobs(account_uuid:, chat_ids:, limit_per_chat:, wait_seconds:, reason:, retry_attempt:, repair_existing:, wait: nil)
       ids = normalize_chat_ids(chat_ids)
       return [] if ids.empty?
 
@@ -174,7 +179,8 @@ module Telegram
           limit_per_chat: limit_per_chat,
           wait_seconds: wait_seconds,
           reason: reason.to_s,
-          retry_attempt: retry_attempt
+          retry_attempt: retry_attempt,
+          repair_existing: repair_existing
         )
       end
     end

@@ -93,13 +93,36 @@ module Api
         profile = TelegramAccountProfile.find_by(telegram_account_id: @account.id)
         fallback_ids = profile&.watched_chat_ids
         chat_ids = Array(params[:chat_ids] || fallback_ids).map(&:to_i).uniq
-        sync = ensure_session!.sync_messages_for_chats_async(
+        session = ensure_session!
+        sync = session.sync_messages_for_chats_async(
           chat_ids:,
           limit_per_chat: params[:message_limit],
           wait_seconds: params[:wait_seconds],
           reason: "api_sync_messages"
         )
-        render json: { session_id: @account.uuid, chat_ids:, message_sync: sync }, status: :accepted
+        repair_chat_ids = candidate_poll_repair_chat_ids(chat_ids)
+        repair_sync =
+          if repair_chat_ids.any?
+            Rails.logger.info(
+              "Scheduling poll repair sync for account #{@account.uuid} chats=#{repair_chat_ids.inspect} " \
+              "reason=api_sync_messages_poll_repair"
+            )
+            session.sync_messages_for_chats_async(
+              chat_ids: repair_chat_ids,
+              limit_per_chat: params[:message_limit],
+              wait_seconds: params[:wait_seconds],
+              reason: "api_sync_messages_poll_repair",
+              repair_existing: true
+            )
+          else
+            {
+              enqueued: false,
+              status: "skipped",
+              reason: "no_candidate_chats",
+              chat_ids: []
+            }
+          end
+        render json: { session_id: @account.uuid, chat_ids:, message_sync: sync, poll_repair_sync: repair_sync }, status: :accepted
       end
 
       def sync_group_members
@@ -194,6 +217,17 @@ module Api
             }
           end
         }
+      end
+
+      def candidate_poll_repair_chat_ids(chat_ids)
+        ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq.sort
+        return [] if ids.empty?
+
+        TelegramMessage.where(telegram_account_id: @account.id, td_chat_id: ids, text: nil)
+                       .distinct
+                       .order(:td_chat_id)
+                       .pluck(:td_chat_id)
+                       .map(&:to_i)
       end
 
       def render_invalid_state(error)
