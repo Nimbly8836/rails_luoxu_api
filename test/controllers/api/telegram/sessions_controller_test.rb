@@ -70,18 +70,9 @@ module Api
         cleanup_account_storage(account)
       end
 
-      test "sync_messages skips poll repair when requested chats do not have null text rows" do
+      test "sync_messages skips poll repair when requested chats have no local history" do
         user = create_system_user
         account = create_account
-        TelegramMessage.create!(
-          telegram_account: account,
-          td_chat_id: -100456,
-          td_message_id: 300_000_000_789,
-          td_sender_id: 42,
-          message_at: Time.at(1_700_000_100),
-          message_id: 789,
-          text: "healthy"
-        )
 
         calls = []
         fake_session = build_session(calls)
@@ -98,6 +89,46 @@ module Api
         assert_equal false, response.parsed_body.dig("message_sync", "repair_existing")
         assert_equal false, response.parsed_body.dig("poll_repair_sync", "enqueued")
         assert_equal "no_candidate_chats", response.parsed_body.dig("poll_repair_sync", "reason")
+      ensure
+        cleanup_account_storage(account)
+      end
+
+      test "sync_messages enqueues poll repair for requested chats with existing history even when text is present" do
+        user = create_system_user
+        account = create_account
+        TelegramMessage.create!(
+          telegram_account: account,
+          td_chat_id: -100456,
+          td_message_id: 300_000_000_789,
+          td_sender_id: 42,
+          message_at: Time.at(1_700_000_100),
+          message_id: 789,
+          text: "Historical poll question"
+        )
+
+        calls = []
+        fake_session = build_session(calls)
+
+        with_runtime_session(account, fake_session) do
+          post "/api/telegram/sessions/#{account.uuid}/sync_messages",
+               params: { chat_ids: [ -100456 ], message_limit: 20 },
+               as: :json,
+               headers: auth_headers(user)
+        end
+
+        assert_response :accepted
+        assert_equal 2, calls.size
+        assert_equal(
+          {
+            chat_ids: [ -100456 ],
+            limit_per_chat: 20,
+            wait_seconds: nil,
+            reason: "api_sync_messages_poll_repair",
+            repair_existing: true
+          },
+          calls.second
+        )
+        assert_equal [ -100456 ], response.parsed_body.dig("poll_repair_sync", "chat_ids")
       ensure
         cleanup_account_storage(account)
       end
