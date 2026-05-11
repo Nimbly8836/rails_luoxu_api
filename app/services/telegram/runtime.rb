@@ -103,7 +103,7 @@ module Telegram
       def backfill_poll_messages!(account_uuid:, chat_ids: nil, limit_per_chat: nil, wait_seconds: nil, all_tracked: false)
         account = TelegramAccount.find_by!(uuid: account_uuid)
         ids = normalize_backfill_chat_ids(chat_ids)
-        ids = candidate_backfill_chat_ids_for(account, all_tracked:) if ids.empty?
+        ids = candidate_backfill_chat_ids_for(account) if ids.empty?
 
         return {
           chats: 0,
@@ -188,9 +188,8 @@ module Telegram
         Array(chat_ids).flat_map { |value| value.to_s.split(",") }.map(&:strip).reject(&:blank?).map(&:to_i).select(&:nonzero?).uniq.sort
       end
 
-      def candidate_backfill_chat_ids_for(account, all_tracked:)
+      def candidate_backfill_chat_ids_for(account)
         scope = account.telegram_messages
-        scope = scope.where(text: nil) unless all_tracked
         scope.distinct.order(:td_chat_id).pluck(:td_chat_id).map(&:to_i).select(&:nonzero?)
       end
 

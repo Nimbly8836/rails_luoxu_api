@@ -223,7 +223,7 @@ module Api
         ids = Array(chat_ids).map(&:to_i).select(&:nonzero?).uniq.sort
         return [] if ids.empty?
 
-        TelegramMessage.where(telegram_account_id: @account.id, td_chat_id: ids, text: nil)
+        TelegramMessage.where(telegram_account_id: @account.id, td_chat_id: ids)
                        .distinct
                        .order(:td_chat_id)
                        .pluck(:td_chat_id)

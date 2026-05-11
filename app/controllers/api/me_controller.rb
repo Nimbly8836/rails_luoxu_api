@@ -186,19 +186,57 @@ module Api
         allows_multiple_answers: poll.allows_multiple_answers,
         total_voter_count: poll.total_voter_count,
         is_closed: poll.is_closed,
-        options: poll.telegram_poll_options.sort_by(&:option_index).map do |option|
-          {
-            option_index: option.option_index,
-            text: option.text,
-            voter_count: option.voter_count,
-            is_chosen: option.is_chosen
-          }
-        end,
+        options: serialize_poll_options(poll),
         account_state: {
           has_voted: account_state&.has_voted || false,
           chosen_option_indexes: account_state&.chosen_option_indexes || []
         }
       }
+    end
+
+    def serialize_poll_options(poll)
+      option_rows = poll.telegram_poll_options.sort_by(&:option_index)
+      return option_rows.map { |option| serialize_poll_option_row(option) } if option_rows.any?
+
+      raw_options = poll.raw_payload.is_a?(Hash) ? poll.raw_payload["options"] : nil
+      return [] unless raw_options.is_a?(Array)
+
+      raw_options.each_with_index.filter_map do |option, index|
+        serialize_raw_poll_option(option, index)
+      end
+    end
+
+    def serialize_poll_option_row(option)
+      {
+        option_index: option.option_index,
+        text: option.text,
+        voter_count: option.voter_count,
+        is_chosen: option.is_chosen
+      }
+    end
+
+    def serialize_raw_poll_option(option, index)
+      return nil unless option.is_a?(Hash)
+
+      normalized_option = option.deep_stringify_keys
+      text = extract_formatted_text(normalized_option["text"])
+      return nil if text.blank?
+
+      {
+        option_index: index,
+        text: text,
+        voter_count: normalized_option["voter_count"].to_i,
+        is_chosen: ActiveModel::Type::Boolean.new.cast(normalized_option["is_chosen"]) || false
+      }
+    end
+
+    def extract_formatted_text(value)
+      case value
+      when String
+        value
+      when Hash
+        value.deep_stringify_keys["text"]
+      end
     end
 
     def serialize_member(member)
@@ -230,18 +268,34 @@ module Api
     end
 
     def poll_map_for(messages)
-      exact_message_tuple_scope(TelegramPoll.all, messages)
-        .includes(:telegram_poll_options)
-        .index_by do |poll|
-        [ poll.telegram_account_id, poll.td_chat_id, poll.message_id ]
+      message_rows = messages.to_a
+      exact_poll_map = exact_message_tuple_scope(TelegramPoll.all, message_rows)
+                       .includes(:telegram_poll_options)
+                       .index_by { |poll| message_poll_key(poll) }
+      missing_messages = message_rows.reject { |message| exact_poll_map.key?(message_poll_key(message)) }
+      return exact_poll_map if missing_messages.empty?
+
+      fallback_poll_map = chat_message_tuple_scope(TelegramPoll.all, missing_messages)
+                          .includes(:telegram_poll_options)
+                          .order(updated_at: :desc)
+                          .group_by { |poll| [ poll.td_chat_id, poll.message_id ] }
+                          .transform_values(&:first)
+      missing_messages.each do |message|
+        fallback_poll = fallback_poll_map[[ message.td_chat_id, message.message_id ]]
+        exact_poll_map[message_poll_key(message)] = fallback_poll if fallback_poll.present?
       end
+      exact_poll_map
     end
 
     def account_poll_state_map_for(messages)
       exact_message_tuple_scope(TelegramAccountPollState.all, messages)
         .index_by do |account_state|
-        [ account_state.telegram_account_id, account_state.td_chat_id, account_state.message_id ]
+        message_poll_key(account_state)
       end
+    end
+
+    def message_poll_key(record)
+      [ record.telegram_account_id, record.td_chat_id, record.message_id ]
     end
 
     def exact_message_tuple_scope(scope, messages)
@@ -252,6 +306,19 @@ module Api
       predicate = ActiveRecord::Base.send(
         :sanitize_sql_array,
         [ "(telegram_account_id, td_chat_id, message_id) IN (#{placeholders})", *tuples.flatten ]
+      )
+
+      scope.where(predicate)
+    end
+
+    def chat_message_tuple_scope(scope, messages)
+      tuples = messages.map { |message| [ message.td_chat_id, message.message_id ] }.uniq
+      return scope.none if tuples.empty?
+
+      placeholders = tuples.map { "(?, ?)" }.join(", ")
+      predicate = ActiveRecord::Base.send(
+        :sanitize_sql_array,
+        [ "(td_chat_id, message_id) IN (#{placeholders})", *tuples.flatten ]
       )
 
       scope.where(predicate)

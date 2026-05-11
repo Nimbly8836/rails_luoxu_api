@@ -135,6 +135,71 @@ module Api
       )
     end
 
+    test "search_messages falls back to raw poll payload options when option rows are missing" do
+      user = create_system_user
+      account = create_account
+      chat_id = 765_432
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      message = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 2501,
+        td_sender_id: 3501,
+        message_id: 651,
+        message_at: Time.current,
+        text: "raw payload poll message"
+      )
+
+      TelegramPoll.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        message_id: message.message_id,
+        poll_id: "poll_651",
+        question: "Raw fallback poll",
+        is_anonymous: true,
+        allows_multiple_answers: false,
+        total_voter_count: 5,
+        is_closed: false,
+        raw_payload: {
+          "options" => [
+            {
+              "text" => { "text" => "First" },
+              "voter_count" => 2,
+              "is_chosen" => false
+            },
+            {
+              "text" => "Second",
+              "voter_count" => 3,
+              "is_chosen" => true
+            }
+          ]
+        }
+      )
+
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id }, headers: auth_headers(user)
+
+      assert_response :success
+      options = response.parsed_body.fetch("items").first.dig("poll", "options")
+      assert_equal(
+        [
+          {
+            "option_index" => 0,
+            "text" => "First",
+            "voter_count" => 2,
+            "is_chosen" => false
+          },
+          {
+            "option_index" => 1,
+            "text" => "Second",
+            "voter_count" => 3,
+            "is_chosen" => true
+          }
+        ],
+        options
+      )
+    end
+
     test "search_messages loads poll snapshots by exact message tuples" do
       user = create_system_user
       primary_account = create_account
@@ -209,6 +274,43 @@ module Api
         refute_match(/td_chat_id IN \(/, query)
         refute_match(/message_id IN \(/, query)
       end
+    end
+
+    test "search_messages falls back to same chat message poll snapshot from another account" do
+      user = create_system_user
+      poll_account = create_account
+      message_account = create_account
+      chat_id = 333_333
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      TelegramMessage.create!(
+        telegram_account: message_account,
+        td_chat_id: chat_id,
+        td_message_id: 4001,
+        td_sender_id: 5001,
+        message_id: 801,
+        message_at: Time.current,
+        text: "shared poll message"
+      )
+      create_poll_snapshot(
+        account: poll_account,
+        chat_id: chat_id,
+        message_id: 801,
+        poll_id: "poll_shared_801",
+        question: "Shared poll question"
+      )
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id }, headers: auth_headers(user)
+
+      assert_response :success
+      poll_payload = response.parsed_body.fetch("items").first.fetch("poll")
+      assert_equal "Shared poll question", poll_payload["question"]
+      assert_equal(
+        {
+          "has_voted" => false,
+          "chosen_option_indexes" => []
+        },
+        poll_payload["account_state"]
+      )
     end
 
     private
