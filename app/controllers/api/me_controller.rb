@@ -75,9 +75,19 @@ module Api
       user_ids = normalize_integer_list(params[:user_ids])
       include_deleted = ActiveModel::Type::Boolean.new.cast(params[:include_deleted])
       resolve_links = ActiveModel::Type::Boolean.new.cast(params[:resolve_links])
-      start_at = parse_time_param(:start_at)
-      end_at = parse_time_param(:end_at)
-      order_direction = message_search_order_direction
+      start_at = parse_message_time_param(:start_at)
+      return if performed?
+
+      end_at = parse_message_time_param(:end_at)
+      return if performed?
+
+      if start_at.present? && end_at.present? && start_at > end_at
+        return render json: { error: "start_at must be earlier than or equal to end_at" }, status: :bad_request
+      end
+
+      message_order = normalize_message_order(params[:order])
+      return if performed?
+
       page = params[:page].to_i
       page = 1 if page < 1
       per_page = (params[:per_page] || params[:limit] || 50).to_i.clamp(1, 200)
@@ -87,11 +97,11 @@ module Api
       permitted_ids &= [ chat_id ] if chat_id.present?
       return render json: [] if permitted_ids.empty?
 
-      scope = TelegramMessage.where(td_chat_id: permitted_ids)
-      scope = scope.where(deleted_at: nil) unless include_deleted
-      scope = scope.where(td_sender_id: user_ids) if user_ids.any?
-      scope = scope.where("message_at >= ?", start_at) if start_at
-      scope = scope.where("message_at <= ?", end_at) if end_at
+      scope = TelegramMessage.where(telegram_messages: { td_chat_id: permitted_ids })
+      scope = scope.where(telegram_messages: { deleted_at: nil }) unless include_deleted
+      scope = scope.where(telegram_messages: { td_sender_id: user_ids }) if user_ids.any?
+      scope = scope.where("telegram_messages.message_at >= ?", start_at) if start_at.present?
+      scope = scope.where("telegram_messages.message_at <= ?", end_at) if end_at.present?
       if query.present?
         mode = params[:mode].to_s
         if mode == "regex"
@@ -111,9 +121,10 @@ module Api
                         "NULL AS highlight"
       end
       messages = scope
+                 .joins(search_message_poll_join_sql)
                  .includes(:telegram_account)
-                 .select("telegram_messages.*", highlight_sql)
-                 .order(message_at: order_direction, id: order_direction)
+                 .select("telegram_messages.*", highlight_sql, "matched_telegram_polls.id AS matched_poll_id")
+                 .reorder(message_order_sql(message_order))
                  .offset(offset)
                  .limit(per_page)
 
@@ -144,19 +155,6 @@ module Api
 
     private
 
-    def parse_time_param(name)
-      value = params[name].to_s
-      return nil if value.blank?
-
-      Time.zone.parse(value)
-    rescue ArgumentError
-      nil
-    end
-
-    def message_search_order_direction
-      params[:order].to_s.downcase == "asc" ? :asc : :desc
-    end
-
     def serialize_chat(chat, source_count)
       {
         td_chat_id: chat.td_chat_id,
@@ -171,6 +169,7 @@ module Api
 
     def serialize_message(message, member_map, poll_map:, account_poll_state_map:, resolve_links:, message_link_sessions:)
       member = member_map[[ message.td_chat_id, message.td_sender_id ]]
+      poll = poll_map[matched_poll_id(message)]
       poll_key = [ message.telegram_account_id, message.td_chat_id, message.message_id ]
       resolved_link = resolve_links ? resolve_message_link_data(message, message_link_sessions:) : {}
       channel_id = resolved_link[:channel_id] || telegram_privatepost_channel_id(message.td_chat_id)
@@ -191,7 +190,7 @@ module Api
         sender_avatar_small_content_type: member&.avatar_small_content_type,
         sender_avatar_small_base64: base64_blob(member&.avatar_small_data),
         message_at: message.message_at,
-        poll: serialize_poll(poll_map[poll_key], account_poll_state_map[poll_key])
+        poll: serialize_poll(poll, account_poll_state_map[poll_key])
       }
     end
 
@@ -214,8 +213,16 @@ module Api
 
     def serialize_poll_options(poll)
       option_rows = poll.telegram_poll_options.sort_by(&:option_index)
-      return option_rows.map { |option| serialize_poll_option_row(option) } if option_rows.any?
+      row_options = option_rows.map { |option| serialize_poll_option_row(option) }
+      raw_options = serialize_raw_poll_options(poll)
 
+      return raw_options if raw_options.size > row_options.size
+      return row_options if row_options.any?
+
+      raw_options
+    end
+
+    def serialize_raw_poll_options(poll)
       raw_options = poll.raw_payload.is_a?(Hash) ? poll.raw_payload["options"] : nil
       return [] unless raw_options.is_a?(Array)
 
@@ -229,7 +236,8 @@ module Api
         option_index: option.option_index,
         text: option.text,
         voter_count: option.voter_count,
-        is_chosen: option.is_chosen
+        is_chosen: option.is_chosen,
+        is_correct: option.is_correct
       }
     end
 
@@ -244,7 +252,8 @@ module Api
         option_index: index,
         text: text,
         voter_count: normalized_option["voter_count"].to_i,
-        is_chosen: ActiveModel::Type::Boolean.new.cast(normalized_option["is_chosen"]) || false
+        is_chosen: boolean_or_default(normalized_option["is_chosen"], default: false),
+        is_correct: normalized_option.key?("is_correct") ? boolean_or_nil(normalized_option["is_correct"]) : nil
       }
     end
 
@@ -285,24 +294,73 @@ module Api
         .uniq
     end
 
-    def poll_map_for(messages)
-      message_rows = messages.to_a
-      exact_poll_map = exact_message_tuple_scope(TelegramPoll.all, message_rows)
-                       .includes(:telegram_poll_options)
-                       .index_by { |poll| message_poll_key(poll) }
-      missing_messages = message_rows.reject { |message| exact_poll_map.key?(message_poll_key(message)) }
-      return exact_poll_map if missing_messages.empty?
+    def parse_message_time_param(name)
+      raw_value = params[name]
+      return nil if raw_value.blank?
 
-      fallback_poll_map = chat_message_tuple_scope(TelegramPoll.all, missing_messages)
-                          .includes(:telegram_poll_options)
-                          .order(updated_at: :desc)
-                          .group_by { |poll| [ poll.td_chat_id, poll.message_id ] }
-                          .transform_values(&:first)
-      missing_messages.each do |message|
-        fallback_poll = fallback_poll_map[[ message.td_chat_id, message.message_id ]]
-        exact_poll_map[message_poll_key(message)] = fallback_poll if fallback_poll.present?
+      Time.iso8601(raw_value.to_s)
+    rescue ArgumentError
+      render json: { error: "Invalid #{name}" }, status: :bad_request
+      nil
+    end
+
+    def normalize_message_order(raw_value)
+      order = raw_value.to_s.presence || "desc"
+      return order if %w[asc desc].include?(order)
+
+      render json: { error: "Invalid order" }, status: :bad_request
+      nil
+    end
+
+    def message_order_sql(order)
+      direction = order.upcase
+      Arel.sql("telegram_messages.message_at #{direction}, telegram_messages.id #{direction}")
+    end
+
+    def boolean_or_default(value, default:)
+      boolean = strict_boolean_value(value)
+      boolean.nil? ? default : boolean
+    end
+
+    def boolean_or_nil(value)
+      strict_boolean_value(value)
+    end
+
+    def strict_boolean_value(value)
+      case value
+      when true, false
+        value
+      when 1, "1", "true", "TRUE", "t", "T"
+        true
+      when 0, "0", "false", "FALSE", "f", "F"
+        false
       end
-      exact_poll_map
+    end
+
+    def poll_map_for(messages)
+      poll_ids = messages.filter_map { |message| matched_poll_id(message) }.uniq
+      return {} if poll_ids.empty?
+
+      TelegramPoll.where(id: poll_ids).includes(:telegram_poll_options).index_by(&:id)
+    end
+
+    def matched_poll_id(message)
+      message.try(:matched_poll_id).to_i.presence
+    end
+
+    def search_message_poll_join_sql
+      <<~SQL.squish
+        LEFT JOIN LATERAL (
+          SELECT telegram_polls.id
+          FROM telegram_polls
+          WHERE telegram_polls.td_chat_id = telegram_messages.td_chat_id
+            AND telegram_polls.message_id = telegram_messages.message_id
+          ORDER BY (telegram_polls.telegram_account_id = telegram_messages.telegram_account_id) DESC,
+                   telegram_polls.updated_at DESC,
+                   telegram_polls.id DESC
+          LIMIT 1
+        ) matched_telegram_polls ON TRUE
+      SQL
     end
 
     def account_poll_state_map_for(messages)
@@ -324,19 +382,6 @@ module Api
       predicate = ActiveRecord::Base.send(
         :sanitize_sql_array,
         [ "(telegram_account_id, td_chat_id, message_id) IN (#{placeholders})", *tuples.flatten ]
-      )
-
-      scope.where(predicate)
-    end
-
-    def chat_message_tuple_scope(scope, messages)
-      tuples = messages.map { |message| [ message.td_chat_id, message.message_id ] }.uniq
-      return scope.none if tuples.empty?
-
-      placeholders = tuples.map { "(?, ?)" }.join(", ")
-      predicate = ActiveRecord::Base.send(
-        :sanitize_sql_array,
-        [ "(td_chat_id, message_id) IN (#{placeholders})", *tuples.flatten ]
       )
 
       scope.where(predicate)

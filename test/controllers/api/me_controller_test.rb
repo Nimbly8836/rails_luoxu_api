@@ -153,14 +153,16 @@ module Api
         option_index: 0,
         text: "A",
         voter_count: 3,
-        is_chosen: false
+        is_chosen: false,
+        is_correct: false
       )
       TelegramPollOption.create!(
         telegram_poll: poll,
         option_index: 1,
         text: "B",
         voter_count: 4,
-        is_chosen: true
+        is_chosen: true,
+        is_correct: true
       )
       TelegramAccountPollState.create!(
         telegram_account: account,
@@ -190,13 +192,15 @@ module Api
               "option_index" => 0,
               "text" => "A",
               "voter_count" => 3,
-              "is_chosen" => false
+              "is_chosen" => false,
+              "is_correct" => false
             },
             {
               "option_index" => 1,
               "text" => "B",
               "voter_count" => 4,
-              "is_chosen" => true
+              "is_chosen" => true,
+              "is_correct" => true
             }
           ],
           "account_state" => {
@@ -239,12 +243,11 @@ module Api
             {
               "text" => { "text" => "First" },
               "voter_count" => 2,
-              "is_chosen" => false
+              "is_chosen" => false,
+              "is_correct" => true
             },
             {
-              "text" => "Second",
-              "voter_count" => 3,
-              "is_chosen" => true
+              "text" => "Second"
             }
           ]
         }
@@ -260,17 +263,66 @@ module Api
             "option_index" => 0,
             "text" => "First",
             "voter_count" => 2,
-            "is_chosen" => false
+            "is_chosen" => false,
+            "is_correct" => true
           },
           {
             "option_index" => 1,
             "text" => "Second",
-            "voter_count" => 3,
-            "is_chosen" => true
+            "voter_count" => 0,
+            "is_chosen" => false,
+            "is_correct" => nil
           }
         ],
         options
       )
+    end
+
+    test "search_messages prefers raw poll options when persisted options are incomplete" do
+      user = create_system_user
+      account = create_account
+      chat_id = 876_543
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      message = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 2601,
+        td_sender_id: 3601,
+        message_id: 661,
+        message_at: Time.current,
+        text: "partial poll message"
+      )
+      poll = TelegramPoll.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        message_id: message.message_id,
+        poll_id: "poll_661",
+        question: "Partial fallback poll",
+        is_anonymous: true,
+        allows_multiple_answers: false,
+        total_voter_count: 5,
+        is_closed: false,
+        raw_payload: {
+          "options" => [
+            { "text" => "First", "voter_count" => 2, "is_chosen" => false },
+            { "text" => "Second", "voter_count" => 3, "is_chosen" => true }
+          ]
+        }
+      )
+      TelegramPollOption.create!(
+        telegram_poll: poll,
+        option_index: 0,
+        text: "First",
+        voter_count: 2,
+        is_chosen: false
+      )
+
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id }, headers: auth_headers(user)
+
+      assert_response :success
+      options = response.parsed_body.fetch("items").first.dig("poll", "options")
+      assert_equal [ "First", "Second" ], options.map { |option| option["text"] }
     end
 
     test "search_messages loads poll snapshots by exact message tuples" do
@@ -331,7 +383,7 @@ module Api
         question: "Distractor two"
       )
 
-      poll_queries = capture_sql_queries(/FROM "telegram_polls"|FROM "telegram_account_poll_states"/) do
+      poll_queries = capture_sql_queries(/JOIN LATERAL \( SELECT telegram_polls\.id|FROM "telegram_polls"|FROM "telegram_account_poll_states"/) do
         get "/api/me/search/messages", params: { q: "" }, headers: auth_headers(user)
       end
 
@@ -340,13 +392,13 @@ module Api
       items = response.parsed_body.fetch("items")
       assert_equal [ "Secondary question", "Primary question" ], items.map { |item| item.dig("poll", "question") }
 
-      assert_equal 2, poll_queries.size
-      poll_queries.each do |query|
-        assert_match(/\(\s*telegram_account_id\s*,\s*td_chat_id\s*,\s*message_id\s*\)\s+IN\s+\(\(/, query)
-        refute_match(/telegram_account_id IN \(/, query)
-        refute_match(/td_chat_id IN \(/, query)
-        refute_match(/message_id IN \(/, query)
-      end
+      assert_equal 3, poll_queries.size
+      assert_match(/JOIN LATERAL \( SELECT telegram_polls\.id FROM telegram_polls/, poll_queries.first)
+      assert_match(/telegram_polls\.td_chat_id = telegram_messages\.td_chat_id/, poll_queries.first)
+      assert_match(/telegram_polls\.message_id = telegram_messages\.message_id/, poll_queries.first)
+      assert_match(/telegram_polls\.telegram_account_id = telegram_messages\.telegram_account_id/, poll_queries.first)
+      assert_match(/"telegram_polls"\."id" IN \(/, poll_queries.second)
+      assert_match(/\(\s*telegram_account_id\s*,\s*td_chat_id\s*,\s*message_id\s*\)\s+IN\s+\(\(/, poll_queries.third)
     end
 
     test "search_messages falls back to same chat message poll snapshot from another account" do
