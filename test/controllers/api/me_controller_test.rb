@@ -47,6 +47,79 @@ module Api
       assert_equal [ deleted_message.message_id, visible_message.message_id ], response_body["items"].map { |item| item["message_id"] }
     end
 
+    test "search_messages filters by message_at range and honors ascending order" do
+      user = create_system_user
+      account = create_account
+      chat_id = 124_456
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      before_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1100,
+        td_sender_id: 2100,
+        message_id: 510,
+        message_at: Time.zone.parse("2026-05-11T02:09:59.999Z"),
+        text: "before range"
+      )
+      first_in_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1101,
+        td_sender_id: 2101,
+        message_id: 511,
+        message_at: Time.zone.parse("2026-05-11T02:10:00.000Z"),
+        text: "first in range"
+      )
+      second_in_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1102,
+        td_sender_id: 2102,
+        message_id: 512,
+        message_at: Time.zone.parse("2026-05-13T02:10:00.000Z"),
+        text: "second in range"
+      )
+      last_in_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1103,
+        td_sender_id: 2103,
+        message_id: 513,
+        message_at: Time.zone.parse("2026-05-17T02:10:59.999Z"),
+        text: "last in range"
+      )
+      after_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1104,
+        td_sender_id: 2104,
+        message_id: 514,
+        message_at: Time.zone.parse("2026-05-17T02:11:00.000Z"),
+        text: "after range"
+      )
+
+      get "/api/me/search/messages",
+          params: {
+            q: "",
+            chat_id: chat_id,
+            start_at: "2026-05-11T02:10:00.000Z",
+            end_at: "2026-05-17T02:10:59.999Z",
+            order: "asc"
+          },
+          headers: auth_headers(user)
+
+      assert_response :success
+      response_body = response.parsed_body
+      assert_equal 3, response_body["total"]
+      assert_equal(
+        [ first_in_range.message_id, second_in_range.message_id, last_in_range.message_id ],
+        response_body["items"].map { |item| item["message_id"] }
+      )
+      refute_includes response_body["items"].map { |item| item["message_id"] }, before_range.message_id
+      refute_includes response_body["items"].map { |item| item["message_id"] }, after_range.message_id
+    end
+
     test "search_messages includes poll payload with options and account state" do
       user = create_system_user
       account = create_account

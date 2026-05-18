@@ -75,6 +75,9 @@ module Api
       user_ids = normalize_integer_list(params[:user_ids])
       include_deleted = ActiveModel::Type::Boolean.new.cast(params[:include_deleted])
       resolve_links = ActiveModel::Type::Boolean.new.cast(params[:resolve_links])
+      start_at = parse_time_param(:start_at)
+      end_at = parse_time_param(:end_at)
+      order_direction = message_search_order_direction
       page = params[:page].to_i
       page = 1 if page < 1
       per_page = (params[:per_page] || params[:limit] || 50).to_i.clamp(1, 200)
@@ -87,6 +90,8 @@ module Api
       scope = TelegramMessage.where(td_chat_id: permitted_ids)
       scope = scope.where(deleted_at: nil) unless include_deleted
       scope = scope.where(td_sender_id: user_ids) if user_ids.any?
+      scope = scope.where("message_at >= ?", start_at) if start_at
+      scope = scope.where("message_at <= ?", end_at) if end_at
       if query.present?
         mode = params[:mode].to_s
         if mode == "regex"
@@ -108,7 +113,7 @@ module Api
       messages = scope
                  .includes(:telegram_account)
                  .select("telegram_messages.*", highlight_sql)
-                 .order(message_at: :desc)
+                 .order(message_at: order_direction, id: order_direction)
                  .offset(offset)
                  .limit(per_page)
 
@@ -138,6 +143,19 @@ module Api
     end
 
     private
+
+    def parse_time_param(name)
+      value = params[name].to_s
+      return nil if value.blank?
+
+      Time.zone.parse(value)
+    rescue ArgumentError
+      nil
+    end
+
+    def message_search_order_direction
+      params[:order].to_s.downcase == "asc" ? :asc : :desc
+    end
 
     def serialize_chat(chat, source_count)
       {

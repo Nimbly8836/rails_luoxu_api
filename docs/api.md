@@ -318,6 +318,9 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 | `page` | integer | 否 | 页码，默认 `1` |
 | `per_page` | integer | 否 | 每页数量，范围 `1..200`，默认 `50` |
 | `limit` | integer | 否 | `per_page` 别名 |
+| `start_at` | string | 否 | 消息时间起点，按 `message_at >= start_at` 过滤，支持 ISO 8601 |
+| `end_at` | string | 否 | 消息时间终点，按 `message_at <= end_at` 过滤，支持 ISO 8601 |
+| `order` | string | 否 | 按 `message_at` 排序，`asc` 为升序，其他值默认倒序 |
 | `mode` | string | 否 | `regex` 走 PGroonga 正则；其他值走全文匹配 |
 
 成功响应：
