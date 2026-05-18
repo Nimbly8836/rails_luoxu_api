@@ -4,6 +4,33 @@ require "test_helper"
 
 module Api
   class MeControllerTest < ActionDispatch::IntegrationTest
+    test "search_messages allows empty q but rejects missing q" do
+      user = create_system_user
+      account = create_account
+      chat_id = 122_456
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 999,
+        td_sender_id: 1999,
+        message_id: 499,
+        message_at: Time.current,
+        text: "visible message"
+      )
+
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id }, headers: auth_headers(user)
+
+      assert_response :success
+      assert_equal 1, response.parsed_body["total"]
+
+      get "/api/me/search/messages", params: { chat_id: chat_id }, headers: auth_headers(user)
+
+      assert_response :bad_request
+      assert_equal "q is required", response.parsed_body["error"]
+    end
+
     test "search_messages excludes soft deleted rows by default and includes them when requested" do
       user = create_system_user
       account = create_account
@@ -165,6 +192,70 @@ module Api
       end
       assert_response :success
       assert_match(/ORDER BY "telegram_messages"\."message_at" DESC/, desc_queries.join("\n"))
+    end
+
+    test "search_messages accepts date aliases and sort aliases" do
+      user = create_system_user
+      account = create_account
+      chat_id = 225_456
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      before_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1310,
+        td_sender_id: 2310,
+        message_id: 541,
+        message_at: Time.zone.parse("2026-05-10T23:59:59.999Z"),
+        text: "before alias range"
+      )
+      first_in_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1311,
+        td_sender_id: 2311,
+        message_id: 542,
+        message_at: Time.zone.parse("2026-05-11T00:00:00.000Z"),
+        text: "first alias range"
+      )
+      last_in_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1312,
+        td_sender_id: 2312,
+        message_id: 543,
+        message_at: Time.zone.parse("2026-05-17T23:59:59.999Z"),
+        text: "last alias range"
+      )
+      after_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1313,
+        td_sender_id: 2313,
+        message_id: 544,
+        message_at: Time.zone.parse("2026-05-18T00:00:00.000Z"),
+        text: "after alias range"
+      )
+
+      get "/api/me/search/messages",
+          params: {
+            q: "",
+            chat_id: chat_id,
+            start_date: "2026-05-11",
+            end_date: "2026-05-17",
+            sort: "ascend"
+          },
+          headers: auth_headers(user)
+
+      assert_response :success
+      response_body = response.parsed_body
+      assert_equal 2, response_body["total"]
+      assert_equal(
+        [ first_in_range.message_id, last_in_range.message_id ],
+        response_body["items"].map { |item| item["message_id"] }
+      )
+      refute_includes response_body["items"].map { |item| item["message_id"] }, before_range.message_id
+      refute_includes response_body["items"].map { |item| item["message_id"] }, after_range.message_id
     end
 
     test "search_messages includes poll payload with options and account state" do
@@ -372,6 +463,42 @@ module Api
       assert_equal [ "First", "Second" ], options.map { |option| option["text"] }
     end
 
+    test "search_messages falls back to poll question when message text is blank" do
+      user = create_system_user
+      poll_account = create_account
+      message_account = create_account
+      chat_id = 987_654
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      TelegramMessage.create!(
+        telegram_account: message_account,
+        td_chat_id: chat_id,
+        td_message_id: 2701,
+        td_sender_id: 3701,
+        message_id: 671,
+        message_at: Time.current,
+        text: nil
+      )
+      create_poll_snapshot(
+        account: poll_account,
+        chat_id: chat_id,
+        message_id: 671,
+        poll_id: "poll_671",
+        question: "Recovered poll question"
+      )
+
+      get "/api/me/search/messages",
+          params: { q: "Recovered poll", chat_id: chat_id },
+          headers: auth_headers(user)
+
+      assert_response :success
+      response_body = response.parsed_body
+      assert_equal 1, response_body["total"]
+      item = response_body.fetch("items").first
+      assert_equal "Recovered poll question", item["text"]
+      assert_equal "Recovered poll question", item.dig("poll", "question")
+    end
+
     test "search_messages loads poll snapshots by exact message tuples" do
       user = create_system_user
       primary_account = create_account
@@ -440,7 +567,7 @@ module Api
       assert_equal [ "Secondary question", "Primary question" ], items.map { |item| item.dig("poll", "question") }
 
       assert_equal 3, poll_queries.size
-      assert_match(/JOIN LATERAL \( SELECT telegram_polls\.id FROM telegram_polls/, poll_queries.first)
+      assert_match(/JOIN LATERAL \( SELECT telegram_polls\.id, telegram_polls\.question FROM telegram_polls/, poll_queries.first)
       assert_match(/telegram_polls\.td_chat_id = telegram_messages\.td_chat_id/, poll_queries.first)
       assert_match(/telegram_polls\.message_id = telegram_messages\.message_id/, poll_queries.first)
       assert_match(/telegram_polls\.telegram_account_id = telegram_messages\.telegram_account_id/, poll_queries.first)

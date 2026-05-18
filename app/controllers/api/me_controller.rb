@@ -70,15 +70,17 @@ module Api
     end
 
     def search_messages
-      query = params.require(:q).to_s.strip
+      return render json: { error: "q is required" }, status: :bad_request unless params.key?(:q)
+
+      query = params[:q].to_s.strip
       chat_id = params[:chat_id].to_i if params[:chat_id].present?
       user_ids = normalize_integer_list(params[:user_ids])
       include_deleted = ActiveModel::Type::Boolean.new.cast(params[:include_deleted])
       resolve_links = ActiveModel::Type::Boolean.new.cast(params[:resolve_links])
-      start_at = parse_message_time_param(:start_at)
+      start_at = parse_message_time_param(:start_at, boundary: :start)
       return if performed?
 
-      end_at = parse_message_time_param(:end_at)
+      end_at = parse_message_time_param(:end_at, boundary: :end)
       return if performed?
 
       if start_at.present? && end_at.present? && start_at > end_at
@@ -101,20 +103,16 @@ module Api
       scope = scope.where(telegram_messages: { deleted_at: nil }) unless include_deleted
       scope = scope.where(telegram_messages: { td_sender_id: user_ids }) if user_ids.any?
       scope = apply_message_time_range(scope, start_at:, end_at:)
-      if query.present?
-        mode = params[:mode].to_s
-        if mode == "regex"
-          scope = scope.where("text &~ ?", query)
-        else
-          scope = scope.where("text &@~ ?", query)
-        end
-      end
+      scope = apply_message_query(scope, query:, mode: params[:mode].to_s) if query.present?
 
       total = scope.count
       highlight_sql = if query.present?
                         ActiveRecord::Base.send(
                           :sanitize_sql_array,
-                          [ "pgroonga_highlight_html(text, ARRAY[?]::text[]) AS highlight", query ]
+                          [
+                            "pgroonga_highlight_html(COALESCE(telegram_messages.text, matched_telegram_polls.question), ARRAY[?]::text[]) AS highlight",
+                            query
+                          ]
                         )
       else
                         "NULL AS highlight"
@@ -182,7 +180,7 @@ module Api
         tg_privatepost_channel_id: channel_id,
         tg_privatepost_url: privatepost_url,
         telegram_message_link: resolved_link[:url],
-        text: message.text,
+        text: message.text.presence || poll&.question,
         sender_id: message.td_sender_id,
         sender_name: member&.name.presence || message.sender_name,
         sender_username: member&.username,
@@ -293,14 +291,43 @@ module Api
         .uniq
     end
 
-    def parse_message_time_param(name)
-      raw_value = params[name]
+    def parse_message_time_param(name, boundary:)
+      raw_value = message_time_param_value(name)
       return nil if raw_value.blank?
 
-      Time.zone.iso8601(raw_value.to_s).utc
+      parse_message_time_value(raw_value, boundary:)
     rescue ArgumentError
       render json: { error: "Invalid #{name}" }, status: :bad_request
       nil
+    end
+
+    def message_time_param_value(name)
+      aliases = case name.to_sym
+                when :start_at
+                  %i[start_time start_date from date_from]
+                when :end_at
+                  %i[end_time end_date to date_to]
+                else
+                  []
+      end
+
+      ([ name ] + aliases).each do |param_name|
+        value = params[param_name]
+        return value if value.present?
+      end
+
+      nil
+    end
+
+    def parse_message_time_value(raw_value, boundary:)
+      value = raw_value.to_s.strip
+      if value.match?(/\A\d{4}-\d{2}-\d{2}\z/)
+        date = Date.iso8601(value)
+        time = boundary == :end ? date.end_of_day : date.beginning_of_day
+        return time.in_time_zone.utc
+      end
+
+      Time.zone.iso8601(value).utc
     end
 
     def apply_message_time_range(scope, start_at:, end_at:)
@@ -312,11 +339,40 @@ module Api
       scope
     end
 
+    def apply_message_query(scope, query:, mode:)
+      operator = mode == "regex" ? "&~" : "&@~"
+      predicate = ActiveRecord::Base.send(
+        :sanitize_sql_array,
+        [
+          <<~SQL.squish,
+            (
+              telegram_messages.text #{operator} ?
+              OR (
+                COALESCE(telegram_messages.text, '') = ''
+                AND EXISTS (
+                  SELECT 1
+                  FROM telegram_polls
+                  WHERE telegram_polls.td_chat_id = telegram_messages.td_chat_id
+                    AND telegram_polls.message_id = telegram_messages.message_id
+                    AND telegram_polls.question #{operator} ?
+                )
+              )
+            )
+          SQL
+          query,
+          query
+        ]
+      )
+
+      scope.where(predicate)
+    end
+
     def normalize_message_order
-      raw_value = params[:order].presence || params[:direction].presence || params[:sort_order].presence
-      order = raw_value.to_s.presence || "desc"
-      order = order.downcase
-      return order if %w[asc desc].include?(order)
+      raw_value = params[:order].presence || params[:direction].presence || params[:sort_order].presence || params[:sort].presence
+      order = raw_value.to_s.strip.downcase
+      return "desc" if order.blank?
+      return "asc" if %w[asc ascend ascending oldest oldest_first 1].include?(order)
+      return "desc" if %w[desc descend descending newest newest_first latest -1].include?(order)
 
       render json: { error: "Invalid order" }, status: :bad_request
       nil
@@ -367,7 +423,7 @@ module Api
     def search_message_poll_join_sql
       <<~SQL.squish
         LEFT JOIN LATERAL (
-          SELECT telegram_polls.id
+          SELECT telegram_polls.id, telegram_polls.question
           FROM telegram_polls
           WHERE telegram_polls.td_chat_id = telegram_messages.td_chat_id
             AND telegram_polls.message_id = telegram_messages.message_id

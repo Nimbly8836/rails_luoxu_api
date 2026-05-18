@@ -18,6 +18,12 @@
 EDITOR=vim bin/rails credentials:edit
 ```
 
+如果你只想维护生产环境的加密配置，直接编辑生产 credentials：
+
+```bash
+EDITOR=vim bin/rails credentials:edit --environment production
+```
+
 方式 B（本机没有 Ruby，纯 Docker）：
 
 ```bash
@@ -45,7 +51,7 @@ telegram:
 
 说明：
 - 你如果没有启用 TDLib 加密，`encryption_key` 可以留空字符串。
-- 生产数据库连接请走 `DATABASE_URL`（见下一步），不要依赖 `credentials.db`。
+- 生产数据库连接现在支持放在 `config/credentials/production.yml.enc` 的 `db` 节点里；环境变量仍然可以覆盖它。
 - 如果 credentials 里没有 `secret_key_base`，需要通过 `SECRET_KEY_BASE` 环境变量提供。
 
 ### Step 2) 准备环境变量
@@ -56,7 +62,8 @@ telegram:
 cat > .env <<'ENV'
 RAILS_MASTER_KEY=replace_with_your_master_key
 SECRET_KEY_BASE=replace_with_generated_secret_key_base
-DATABASE_URL=postgresql://rails_luoxu_api:replace_with_db_password@postgres:5432/rails_luoxu_api_production
+# 可选：如果数据库已经写进 config/credentials/production.yml.enc，这里可以不再提供 DATABASE_URL
+# DATABASE_URL=postgresql://rails_luoxu_api:replace_with_db_password@postgres:5432/rails_luoxu_api_production
 POSTGRES_DB=rails_luoxu_api_production
 POSTGRES_USER=rails_luoxu_api
 POSTGRES_PASSWORD=replace_with_db_password
@@ -117,7 +124,7 @@ curl http://127.0.0.1/up
 
 - `RAILS_MASTER_KEY`：用于解密 `config/credentials.yml.enc`。
 - `SECRET_KEY_BASE`：如果没有放进 credentials，生产环境必须显式提供。
-- `DATABASE_URL`：生产数据库连接（当前项目 production 配置优先使用它）。
+- `DATABASE_URL`：生产数据库连接，可选；如果未提供，会回退到 `config/credentials/production.yml.enc` 里的 `db.url`。
 - `TDLIB_DATABASE_ENCRYPTION_KEY`：可选。只有你启用 TDLib 数据库加密时才需要。
 - TDLib 动态库（Docker/Linux）：
   - Docker 构建阶段会从 TDLib 源码自动编译 `libtdjson.so` 并打包进镜像。

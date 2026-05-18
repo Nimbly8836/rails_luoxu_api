@@ -312,14 +312,14 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 
 | 参数名 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `q` | string | 是 | 搜索关键词 |
+| `q` | string | 是 | 搜索关键词；允许传空字符串，表示不按关键词过滤，只按其他条件列消息 |
 | `chat_id` | integer | 否 | 限定某个群 |
 | `user_ids` | integer[] | 否 | 发送者过滤，支持 `user_ids[]=1&user_ids[]=2` 或 `user_ids=1,2` |
 | `include_deleted` | boolean | 否 | 是否包含软删除消息，默认 `false` |
 | `resolve_links` | boolean | 否 | 是否解析 Telegram 消息链接，默认 `false` |
-| `start_at` | string | 否 | 按 `message_at` 起始时间过滤，ISO8601，包含边界 |
-| `end_at` | string | 否 | 按 `message_at` 结束时间过滤，ISO8601，包含边界 |
-| `order` | string | 否 | 按 `message_at` 排序，`asc` 或 `desc`，默认 `desc` |
+| `start_at` | string | 否 | 按 `message_at` 起始时间过滤，ISO8601，包含边界；也接受 `start_time`、`start_date`、`from`、`date_from`，纯日期会按当天 `00:00:00` 处理 |
+| `end_at` | string | 否 | 按 `message_at` 结束时间过滤，ISO8601，包含边界；也接受 `end_time`、`end_date`、`to`、`date_to`，纯日期会按当天 `23:59:59.999999` 处理 |
+| `order` | string | 否 | 按 `message_at` 排序，支持 `asc`/`desc`，也兼容 `direction`、`sort_order`、`sort` 以及 `ascend`、`ascending`、`oldest`、`descend`、`descending`、`newest`、`latest` |
 | `page` | integer | 否 | 页码，默认 `1` |
 | `per_page` | integer | 否 | 每页数量，范围 `1..200`，默认 `50` |
 | `limit` | integer | 否 | `per_page` 别名 |
