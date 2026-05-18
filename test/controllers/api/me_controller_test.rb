@@ -47,6 +47,102 @@ module Api
       assert_equal [ deleted_message.message_id, visible_message.message_id ], response_body["items"].map { |item| item["message_id"] }
     end
 
+    test "search_messages filters by message_at range and orders ascending" do
+      user = create_system_user
+      account = create_account
+      chat_id = 234_567
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+      base_time = Time.iso8601("2026-05-10T00:00:00Z")
+
+      before_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1101,
+        td_sender_id: 2101,
+        message_id: 511,
+        message_at: base_time - 1.hour,
+        text: "before range"
+      )
+      first_in_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1102,
+        td_sender_id: 2102,
+        message_id: 512,
+        message_at: base_time,
+        text: "first in range"
+      )
+      second_in_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1103,
+        td_sender_id: 2103,
+        message_id: 513,
+        message_at: base_time + 1.hour,
+        text: "second in range"
+      )
+      after_range = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1104,
+        td_sender_id: 2104,
+        message_id: 514,
+        message_at: base_time + 2.hours,
+        text: "after range"
+      )
+
+      get "/api/me/search/messages",
+          params: {
+            q: "",
+            chat_id: chat_id,
+            start_at: base_time.iso8601,
+            end_at: (base_time + 1.hour).iso8601,
+            order: "asc"
+          },
+          headers: auth_headers(user)
+
+      assert_response :success
+      response_body = response.parsed_body
+      assert_equal 2, response_body["total"]
+      assert_equal [ first_in_range.message_id, second_in_range.message_id ], response_body["items"].map { |item| item["message_id"] }
+      refute_includes response_body["items"].map { |item| item["message_id"] }, before_range.message_id
+      refute_includes response_body["items"].map { |item| item["message_id"] }, after_range.message_id
+    end
+
+    test "search_messages validates message_at range params and order" do
+      user = create_system_user
+      account = create_account
+      chat_id = 345_678
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+      TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1201,
+        td_sender_id: 2201,
+        message_id: 521,
+        message_at: Time.iso8601("2026-05-10T00:00:00Z"),
+        text: "validated message"
+      )
+
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id, start_at: "not-a-time" }, headers: auth_headers(user)
+      assert_response :bad_request
+      assert_equal "Invalid start_at", response.parsed_body["error"]
+
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id, end_at: "not-a-time" }, headers: auth_headers(user)
+      assert_response :bad_request
+      assert_equal "Invalid end_at", response.parsed_body["error"]
+
+      get "/api/me/search/messages",
+          params: { q: "", chat_id: chat_id, start_at: "2026-05-11T00:00:00Z", end_at: "2026-05-10T00:00:00Z" },
+          headers: auth_headers(user)
+      assert_response :bad_request
+      assert_equal "start_at must be earlier than or equal to end_at", response.parsed_body["error"]
+
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id, order: "newest" }, headers: auth_headers(user)
+      assert_response :bad_request
+      assert_equal "Invalid order", response.parsed_body["error"]
+    end
+
     test "search_messages includes poll payload with options and account state" do
       user = create_system_user
       account = create_account
@@ -80,14 +176,16 @@ module Api
         option_index: 0,
         text: "A",
         voter_count: 3,
-        is_chosen: false
+        is_chosen: false,
+        is_correct: false
       )
       TelegramPollOption.create!(
         telegram_poll: poll,
         option_index: 1,
         text: "B",
         voter_count: 4,
-        is_chosen: true
+        is_chosen: true,
+        is_correct: true
       )
       TelegramAccountPollState.create!(
         telegram_account: account,
@@ -117,13 +215,15 @@ module Api
               "option_index" => 0,
               "text" => "A",
               "voter_count" => 3,
-              "is_chosen" => false
+              "is_chosen" => false,
+              "is_correct" => false
             },
             {
               "option_index" => 1,
               "text" => "B",
               "voter_count" => 4,
-              "is_chosen" => true
+              "is_chosen" => true,
+              "is_correct" => true
             }
           ],
           "account_state" => {
@@ -166,12 +266,11 @@ module Api
             {
               "text" => { "text" => "First" },
               "voter_count" => 2,
-              "is_chosen" => false
+              "is_chosen" => false,
+              "is_correct" => true
             },
             {
-              "text" => "Second",
-              "voter_count" => 3,
-              "is_chosen" => true
+              "text" => "Second"
             }
           ]
         }
@@ -187,17 +286,66 @@ module Api
             "option_index" => 0,
             "text" => "First",
             "voter_count" => 2,
-            "is_chosen" => false
+            "is_chosen" => false,
+            "is_correct" => true
           },
           {
             "option_index" => 1,
             "text" => "Second",
-            "voter_count" => 3,
-            "is_chosen" => true
+            "voter_count" => 0,
+            "is_chosen" => false,
+            "is_correct" => nil
           }
         ],
         options
       )
+    end
+
+    test "search_messages prefers raw poll options when persisted options are incomplete" do
+      user = create_system_user
+      account = create_account
+      chat_id = 876_543
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      message = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 2601,
+        td_sender_id: 3601,
+        message_id: 661,
+        message_at: Time.current,
+        text: "partial poll message"
+      )
+      poll = TelegramPoll.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        message_id: message.message_id,
+        poll_id: "poll_661",
+        question: "Partial fallback poll",
+        is_anonymous: true,
+        allows_multiple_answers: false,
+        total_voter_count: 5,
+        is_closed: false,
+        raw_payload: {
+          "options" => [
+            { "text" => "First", "voter_count" => 2, "is_chosen" => false },
+            { "text" => "Second", "voter_count" => 3, "is_chosen" => true }
+          ]
+        }
+      )
+      TelegramPollOption.create!(
+        telegram_poll: poll,
+        option_index: 0,
+        text: "First",
+        voter_count: 2,
+        is_chosen: false
+      )
+
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id }, headers: auth_headers(user)
+
+      assert_response :success
+      options = response.parsed_body.fetch("items").first.dig("poll", "options")
+      assert_equal [ "First", "Second" ], options.map { |option| option["text"] }
     end
 
     test "search_messages loads poll snapshots by exact message tuples" do
@@ -258,7 +406,7 @@ module Api
         question: "Distractor two"
       )
 
-      poll_queries = capture_sql_queries(/FROM "telegram_polls"|FROM "telegram_account_poll_states"/) do
+      poll_queries = capture_sql_queries(/JOIN LATERAL \( SELECT telegram_polls\.id|FROM "telegram_polls"|FROM "telegram_account_poll_states"/) do
         get "/api/me/search/messages", params: { q: "" }, headers: auth_headers(user)
       end
 
@@ -267,13 +415,13 @@ module Api
       items = response.parsed_body.fetch("items")
       assert_equal [ "Secondary question", "Primary question" ], items.map { |item| item.dig("poll", "question") }
 
-      assert_equal 2, poll_queries.size
-      poll_queries.each do |query|
-        assert_match(/\(\s*telegram_account_id\s*,\s*td_chat_id\s*,\s*message_id\s*\)\s+IN\s+\(\(/, query)
-        refute_match(/telegram_account_id IN \(/, query)
-        refute_match(/td_chat_id IN \(/, query)
-        refute_match(/message_id IN \(/, query)
-      end
+      assert_equal 3, poll_queries.size
+      assert_match(/JOIN LATERAL \( SELECT telegram_polls\.id FROM telegram_polls/, poll_queries.first)
+      assert_match(/telegram_polls\.td_chat_id = telegram_messages\.td_chat_id/, poll_queries.first)
+      assert_match(/telegram_polls\.message_id = telegram_messages\.message_id/, poll_queries.first)
+      assert_match(/telegram_polls\.telegram_account_id = telegram_messages\.telegram_account_id/, poll_queries.first)
+      assert_match(/"telegram_polls"\."id" IN \(/, poll_queries.second)
+      assert_match(/\(\s*telegram_account_id\s*,\s*td_chat_id\s*,\s*message_id\s*\)\s+IN\s+\(\(/, poll_queries.third)
     end
 
     test "search_messages falls back to same chat message poll snapshot from another account" do

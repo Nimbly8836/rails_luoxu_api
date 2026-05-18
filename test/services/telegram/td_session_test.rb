@@ -1461,6 +1461,17 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
           "message_id" => 300_000_000_456,
           "poll" => { "question" => "missing id" }
         }
+      ),
+      Struct.new(:original_type, :raw).new(
+        "updateMessagePoll",
+        {
+          "chat_id" => -100123,
+          "message_id" => 300_000_000_456,
+          "poll" => {
+            "id" => "poll_123",
+            "options" => "not-an-array"
+          }
+        }
       )
     ]
 
@@ -1477,52 +1488,17 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
     end
   end
 
-  test "unsupported updateMessagePoll ignores malformed options payload without changing snapshot" do
+  test "unsupported updateMessagePoll salvages valid options from malformed options payload" do
     account = create_account
     session = build_session(account_id: account.id)
-    initial_update = Struct.new(:original_type, :raw).new(
+    update = Struct.new(:original_type, :raw).new(
       "updateMessagePoll",
       {
         "chat_id" => -100123,
         "message_id" => 300_000_000_456,
         "poll" => {
           "id" => "poll_123",
-          "question" => "Initial question",
-          "is_anonymous" => false,
-          "allows_multiple_answers" => true,
-          "total_voter_count" => 7,
-          "is_closed" => false,
-          "options" => [
-            {
-              "text" => "A",
-              "voter_count" => 3,
-              "is_chosen" => false
-            },
-            {
-              "text" => "B",
-              "voter_count" => 4,
-              "is_chosen" => true
-            }
-          ]
-        }
-      }
-    )
-    session.send(:handle_unsupported_update, initial_update)
-
-    poll = TelegramPoll.find_by!(telegram_account_id: account.id, td_chat_id: -100123, message_id: 456)
-    state = TelegramAccountPollState.find_by!(telegram_account_id: account.id, td_chat_id: -100123, message_id: 456)
-    baseline_poll_updated_at = poll.updated_at
-    baseline_state_updated_at = state.updated_at
-    baseline_option_snapshot = poll.telegram_poll_options.order(:option_index).map { |option| [ option.text, option.voter_count, option.is_chosen ] }
-
-    malformed_update = Struct.new(:original_type, :raw).new(
-      "updateMessagePoll",
-      {
-        "chat_id" => -100123,
-        "message_id" => 300_000_000_456,
-        "poll" => {
-          "id" => "poll_123",
-          "question" => "Broken question",
+          "question" => "Recovered question",
           "is_anonymous" => true,
           "allows_multiple_answers" => false,
           "total_voter_count" => 99,
@@ -1530,8 +1506,14 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
           "options" => [
             {
               "text" => "A",
-              "voter_count" => 5,
-              "is_chosen" => true
+              "is_chosen" => true,
+              "is_correct" => true
+            },
+            {
+              "text" => "B",
+              "voter_count" => "not-an-integer",
+              "is_chosen" => "not-a-boolean",
+              "is_correct" => "not-a-boolean"
             },
             {
               "voter_count" => 4,
@@ -1542,28 +1524,33 @@ class TelegramTdSessionTest < ActiveSupport::TestCase
       }
     )
 
-    assert_no_difference("TelegramPoll.count") do
-      assert_no_difference("TelegramPollOption.count") do
-        assert_no_difference("TelegramAccountPollState.count") do
+    assert_difference("TelegramPoll.count", 1) do
+      assert_difference("TelegramPollOption.count", 2) do
+        assert_difference("TelegramAccountPollState.count", 1) do
           assert_no_difference("TelegramMessageHistory.count") do
-            session.send(:handle_unsupported_update, malformed_update)
+            session.send(:handle_unsupported_update, update)
           end
         end
       end
     end
 
-    poll.reload
-    state.reload
-    assert_equal "Initial question", poll.question
-    assert_equal false, poll.is_anonymous
-    assert_equal true, poll.allows_multiple_answers
-    assert_equal 7, poll.total_voter_count
-    assert_equal false, poll.is_closed
-    assert_equal baseline_poll_updated_at, poll.updated_at
-    assert_equal baseline_state_updated_at, state.updated_at
+    poll = TelegramPoll.find_by!(telegram_account_id: account.id, td_chat_id: -100123, message_id: 456)
+    assert_equal "Recovered question", poll.question
+    assert_equal true, poll.is_anonymous
+    assert_equal false, poll.allows_multiple_answers
+    assert_equal 99, poll.total_voter_count
+    assert_equal true, poll.is_closed
+
+    options = poll.telegram_poll_options.order(:option_index).to_a
+    assert_equal [ 0, 1 ], options.map(&:option_index)
+    assert_equal [ "A", "B" ], options.map(&:text)
+    assert_equal [ 0, 0 ], options.map(&:voter_count)
+    assert_equal [ true, false ], options.map(&:is_chosen)
+    assert_equal [ true, nil ], options.map(&:is_correct)
+
+    state = TelegramAccountPollState.find_by!(telegram_account_id: account.id, td_chat_id: -100123, message_id: 456)
     assert_equal true, state.has_voted
-    assert_equal [ 1 ], state.chosen_option_indexes
-    assert_equal baseline_option_snapshot, poll.telegram_poll_options.order(:option_index).map { |option| [ option.text, option.voter_count, option.is_chosen ] }
+    assert_equal [ 0 ], state.chosen_option_indexes
   end
 
   test "unsupported updateMessagePoll rolls back snapshot when option upsert fails" do

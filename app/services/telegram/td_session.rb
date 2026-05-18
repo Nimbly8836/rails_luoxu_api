@@ -1928,18 +1928,19 @@ module Telegram
     def extract_message_poll_options(raw_options)
       return nil unless raw_options.is_a?(Array)
 
-      raw_options.each_with_index.map do |option, index|
-        parsed_option = parse_message_poll_option(option, index)
-        return nil if parsed_option.nil?
-
-        parsed_option
+      options = raw_options.each_with_index.filter_map do |option, index|
+        parse_message_poll_option(option, index)
       end
+      options.presence
     end
 
     def boolean_or_default(value, default:)
-      return default if value.nil?
+      boolean = strict_boolean_value(value)
+      boolean.nil? ? default : boolean
+    end
 
-      ActiveModel::Type::Boolean.new.cast(value)
+    def boolean_or_nil(value)
+      strict_boolean_value(value)
     end
 
     def parse_message_poll_option(option, index)
@@ -1947,25 +1948,21 @@ module Telegram
 
       normalized_option = option.deep_stringify_keys
       text = extract_formatted_text_text(normalized_option["text"])
-      voter_count = strict_integer_value(normalized_option["voter_count"])
-      is_chosen = strict_boolean_value(normalized_option["is_chosen"])
       return nil unless text.is_a?(String) && text.present?
-      return nil if voter_count.nil? || is_chosen.nil?
 
-      is_correct =
-        if normalized_option.key?("is_correct")
-          value = normalized_option["is_correct"]
-          value.nil? ? nil : strict_boolean_value(value)
-        end
-      return nil if normalized_option.key?("is_correct") && !normalized_option["is_correct"].nil? && is_correct.nil?
-
+      is_correct = boolean_or_nil(normalized_option["is_correct"]) if normalized_option.key?("is_correct")
       {
         option_index: index,
         text: text,
-        voter_count: voter_count,
-        is_chosen: is_chosen,
+        voter_count: integer_or_default(normalized_option["voter_count"], default: 0),
+        is_chosen: boolean_or_default(normalized_option["is_chosen"], default: false),
         is_correct: is_correct
       }
+    end
+
+    def integer_or_default(value, default:)
+      integer = strict_integer_value(value)
+      integer.nil? ? default : integer
     end
 
     def strict_integer_value(value)

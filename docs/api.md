@@ -315,6 +315,11 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 | `q` | string | 是 | 搜索关键词 |
 | `chat_id` | integer | 否 | 限定某个群 |
 | `user_ids` | integer[] | 否 | 发送者过滤，支持 `user_ids[]=1&user_ids[]=2` 或 `user_ids=1,2` |
+| `include_deleted` | boolean | 否 | 是否包含软删除消息，默认 `false` |
+| `resolve_links` | boolean | 否 | 是否解析 Telegram 消息链接，默认 `false` |
+| `start_at` | string | 否 | 按 `message_at` 起始时间过滤，ISO8601，包含边界 |
+| `end_at` | string | 否 | 按 `message_at` 结束时间过滤，ISO8601，包含边界 |
+| `order` | string | 否 | 按 `message_at` 排序，`asc` 或 `desc`，默认 `desc` |
 | `page` | integer | 否 | 页码，默认 `1` |
 | `per_page` | integer | 否 | 每页数量，范围 `1..200`，默认 `50` |
 | `limit` | integer | 否 | `per_page` 别名 |
@@ -341,6 +346,26 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
       "sender_avatar_small_content_type": "image/jpeg",
       "sender_avatar_small_base64": "BASE64...",
       "message_at": "2026-03-16T01:00:00.000Z",
+      "poll": {
+        "question": "Pick a letter",
+        "is_anonymous": false,
+        "allows_multiple_answers": true,
+        "total_voter_count": 7,
+        "is_closed": false,
+        "options": [
+          {
+            "option_index": 0,
+            "text": "A",
+            "voter_count": 3,
+            "is_chosen": false,
+            "is_correct": false
+          }
+        ],
+        "account_state": {
+          "has_voted": true,
+          "chosen_option_indexes": [0]
+        }
+      },
       "highlight": "<span class=\"keyword\">hello</span> world"
     }
   ]
@@ -352,6 +377,8 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 - 如果 `chat_id` 不在当前用户权限范围内，当前实现返回的是空数组 `[]`，不是分页对象。
 - `highlight` 只有在 `q` 非空时才有值。
 - `message_id` 是 Telegram `privatepost` 可用的 `post` 序号，不等于原始 `td_message_id`。
+- `poll` 只有 poll 消息才会返回，按消息的 `td_chat_id` 和 `message_id` 直接关联 poll 快照；`options[].is_correct` 可能为 `null`。
+- `start_at`、`end_at` 或 `order` 非法时返回 `400` 和 `{ "error": "..." }`。
 
 ## Telegram Chats
 
