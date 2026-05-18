@@ -85,7 +85,7 @@ module Api
         return render json: { error: "start_at must be earlier than or equal to end_at" }, status: :bad_request
       end
 
-      message_order = normalize_message_order(params[:order])
+      message_order = normalize_message_order
       return if performed?
 
       page = params[:page].to_i
@@ -124,7 +124,7 @@ module Api
                  .joins(search_message_poll_join_sql)
                  .includes(:telegram_account)
                  .select("telegram_messages.*", highlight_sql, "matched_telegram_polls.id AS matched_poll_id")
-                 .reorder(message_order_sql(message_order))
+                 .reorder(*message_order_nodes(message_order))
                  .offset(offset)
                  .limit(per_page)
 
@@ -304,17 +304,25 @@ module Api
       nil
     end
 
-    def normalize_message_order(raw_value)
+    def normalize_message_order
+      raw_value = params[:order].presence || params[:direction].presence || params[:sort_order].presence
       order = raw_value.to_s.presence || "desc"
+      order = order.downcase
       return order if %w[asc desc].include?(order)
 
       render json: { error: "Invalid order" }, status: :bad_request
       nil
     end
 
-    def message_order_sql(order)
-      direction = order.upcase
-      Arel.sql("telegram_messages.message_at #{direction}, telegram_messages.id #{direction}")
+    def message_order_nodes(order)
+      table = TelegramMessage.arel_table
+      direction = order.to_sym
+      [
+        table[:message_at].public_send(direction),
+        table[:td_chat_id].public_send(direction),
+        table[:message_id].public_send(direction),
+        table[:id].public_send(direction)
+      ]
     end
 
     def boolean_or_default(value, default:)

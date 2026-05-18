@@ -118,6 +118,53 @@ module Api
       )
       refute_includes response_body["items"].map { |item| item["message_id"] }, before_range.message_id
       refute_includes response_body["items"].map { |item| item["message_id"] }, after_range.message_id
+
+      get "/api/me/search/messages",
+          params: {
+            q: "",
+            chat_id: chat_id,
+            start_at: "2026-05-11T02:10:00.000Z",
+            end_at: "2026-05-17T02:10:59.999Z",
+            order: "desc"
+          },
+          headers: auth_headers(user)
+
+      assert_response :success
+      response_body = response.parsed_body
+      assert_equal 3, response_body["total"]
+      assert_equal(
+        [ last_in_range.message_id, second_in_range.message_id, first_in_range.message_id ],
+        response_body["items"].map { |item| item["message_id"] }
+      )
+    end
+
+    test "search_messages sends requested message_at order to sql" do
+      user = create_system_user
+      account = create_account
+      chat_id = 224_456
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1301,
+        td_sender_id: 2301,
+        message_id: 531,
+        message_at: Time.zone.parse("2026-05-11T02:10:00.000Z"),
+        text: "ordered message"
+      )
+
+      asc_queries = capture_sql_queries(/FROM "telegram_messages".*ORDER BY/m) do
+        get "/api/me/search/messages", params: { q: "", chat_id: chat_id, order: "asc" }, headers: auth_headers(user)
+      end
+      assert_response :success
+      assert_match(/ORDER BY "telegram_messages"\."message_at" ASC/, asc_queries.join("\n"))
+
+      desc_queries = capture_sql_queries(/FROM "telegram_messages".*ORDER BY/m) do
+        get "/api/me/search/messages", params: { q: "", chat_id: chat_id, order: "desc" }, headers: auth_headers(user)
+      end
+      assert_response :success
+      assert_match(/ORDER BY "telegram_messages"\."message_at" DESC/, desc_queries.join("\n"))
     end
 
     test "search_messages includes poll payload with options and account state" do
