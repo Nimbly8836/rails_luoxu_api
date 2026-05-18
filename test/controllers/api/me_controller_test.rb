@@ -107,6 +107,20 @@ module Api
       assert_equal [ first_in_range.message_id, second_in_range.message_id ], response_body["items"].map { |item| item["message_id"] }
       refute_includes response_body["items"].map { |item| item["message_id"] }, before_range.message_id
       refute_includes response_body["items"].map { |item| item["message_id"] }, after_range.message_id
+
+      get "/api/me/search/messages",
+          params: {
+            q: "",
+            chat_id: chat_id,
+            start_at: base_time.iso8601,
+            end_at: (base_time + 1.hour).iso8601,
+            order: "desc"
+          },
+          headers: auth_headers(user)
+
+      assert_response :success
+      response_body = response.parsed_body
+      assert_equal [ second_in_range.message_id, first_in_range.message_id ], response_body["items"].map { |item| item["message_id"] }
     end
 
     test "search_messages validates message_at range params and order" do

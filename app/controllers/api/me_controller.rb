@@ -97,11 +97,11 @@ module Api
       permitted_ids &= [ chat_id ] if chat_id.present?
       return render json: [] if permitted_ids.empty?
 
-      scope = TelegramMessage.where(td_chat_id: permitted_ids)
-      scope = scope.where(deleted_at: nil) unless include_deleted
-      scope = scope.where(td_sender_id: user_ids) if user_ids.any?
-      scope = scope.where("message_at >= ?", start_at) if start_at.present?
-      scope = scope.where("message_at <= ?", end_at) if end_at.present?
+      scope = TelegramMessage.where(telegram_messages: { td_chat_id: permitted_ids })
+      scope = scope.where(telegram_messages: { deleted_at: nil }) unless include_deleted
+      scope = scope.where(telegram_messages: { td_sender_id: user_ids }) if user_ids.any?
+      scope = scope.where("telegram_messages.message_at >= ?", start_at) if start_at.present?
+      scope = scope.where("telegram_messages.message_at <= ?", end_at) if end_at.present?
       if query.present?
         mode = params[:mode].to_s
         if mode == "regex"
@@ -124,7 +124,7 @@ module Api
                  .joins(search_message_poll_join_sql)
                  .includes(:telegram_account)
                  .select("telegram_messages.*", highlight_sql, "matched_telegram_polls.id AS matched_poll_id")
-                 .order(message_at: message_order, id: message_order)
+                 .reorder(message_order_sql(message_order))
                  .offset(offset)
                  .limit(per_page)
 
@@ -306,10 +306,15 @@ module Api
 
     def normalize_message_order(raw_value)
       order = raw_value.to_s.presence || "desc"
-      return order.to_sym if %w[asc desc].include?(order)
+      return order if %w[asc desc].include?(order)
 
       render json: { error: "Invalid order" }, status: :bad_request
       nil
+    end
+
+    def message_order_sql(order)
+      direction = order.upcase
+      Arel.sql("telegram_messages.message_at #{direction}, telegram_messages.id #{direction}")
     end
 
     def boolean_or_default(value, default:)
