@@ -100,8 +100,7 @@ module Api
       scope = TelegramMessage.where(telegram_messages: { td_chat_id: permitted_ids })
       scope = scope.where(telegram_messages: { deleted_at: nil }) unless include_deleted
       scope = scope.where(telegram_messages: { td_sender_id: user_ids }) if user_ids.any?
-      scope = scope.where("telegram_messages.message_at >= ?", start_at) if start_at.present?
-      scope = scope.where("telegram_messages.message_at <= ?", end_at) if end_at.present?
+      scope = apply_message_time_range(scope, start_at:, end_at:)
       if query.present?
         mode = params[:mode].to_s
         if mode == "regex"
@@ -298,10 +297,19 @@ module Api
       raw_value = params[name]
       return nil if raw_value.blank?
 
-      Time.iso8601(raw_value.to_s)
+      Time.zone.iso8601(raw_value.to_s).utc
     rescue ArgumentError
       render json: { error: "Invalid #{name}" }, status: :bad_request
       nil
+    end
+
+    def apply_message_time_range(scope, start_at:, end_at:)
+      message_at = TelegramMessage.arel_table[:message_at]
+      return scope.where(telegram_messages: { message_at: start_at..end_at }) if start_at.present? && end_at.present?
+      return scope.where(message_at.gteq(start_at)) if start_at.present?
+      return scope.where(message_at.lteq(end_at)) if end_at.present?
+
+      scope
     end
 
     def normalize_message_order
