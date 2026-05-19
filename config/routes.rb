@@ -12,7 +12,9 @@ Rails.application.routes.draw do
     patch "auth/users/:id/chat_ids" => "auth#update_chat_ids"
     get "me/chats" => "me#chats"
     get "me/chats/:chat_id" => "me#chat"
+    get "me/chats/:chat_id/avatar" => "me#chat_avatar"
     get "me/chats/:chat_id/members" => "me#chat_members"
+    get "me/chats/:chat_id/members/:uid/avatar" => "me#chat_member_avatar"
     get "me/search/messages" => "me#search_messages"
 
     namespace :telegram do

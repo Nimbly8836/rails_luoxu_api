@@ -1,10 +1,9 @@
 # frozen_string_literal: true
 
-require "base64"
-
 module Api
   class MeController < ApplicationController
     before_action :authenticate_system_user!
+    skip_before_action :authenticate_system_user!, only: %i[chat_avatar chat_member_avatar]
 
     TD_SUPERGROUP_CHAT_ABS_PREFIX = 1_000_000_000_000
     TG_PRIVATEPOST_URL_PATTERN = %r{\Atg://privatepost\?(?:[^#]*&)?channel=(\d+)&post=(\d+)\b}.freeze
@@ -16,7 +15,7 @@ module Api
       rows = TelegramChat.where(td_chat_id: permitted_ids).order(:td_chat_id, :telegram_account_id)
       grouped = rows.group_by(&:td_chat_id)
 
-      render json: grouped.values.map { |entries| serialize_chat(entries.first, entries.size) }
+      render json: grouped.values.map { |entries| serialize_chat(entries.first, entries.size, avatar_source: avatar_source_from(entries)) }
     end
 
     def chat
@@ -31,7 +30,21 @@ module Api
       end
       return head :not_found if rows.empty?
 
-      render json: serialize_chat(rows.first, rows.size)
+      render json: serialize_chat(rows.first, rows.size, avatar_source: avatar_source_from(rows))
+    end
+
+    def chat_avatar
+      chat = avatar_source_from(TelegramChat.where(td_chat_id: params.require(:chat_id).to_i))
+      return head :not_found if chat.nil? || chat.avatar_small_data.blank?
+
+      send_avatar(chat)
+    end
+
+    def chat_member_avatar
+      member = TelegramChatUsername.find_by(group_id: params.require(:chat_id).to_i, uid: params.require(:uid).to_i)
+      return head :not_found if member.nil? || member.avatar_small_data.blank?
+
+      send_avatar(member)
     end
 
     def chat_members
@@ -152,13 +165,14 @@ module Api
 
     private
 
-    def serialize_chat(chat, source_count)
+    def serialize_chat(chat, source_count, avatar_source: chat)
       {
         td_chat_id: chat.td_chat_id,
         title: chat.title,
         chat_type: chat.chat_type,
-        avatar_small_content_type: chat.avatar_small_content_type,
-        avatar_small_base64: base64_blob(chat.avatar_small_data),
+        avatar_small_content_type: avatar_source&.avatar_small_content_type,
+        avatar_small_url: chat_avatar_small_url(avatar_source),
+        avatar_small_cache_key: avatar_cache_key(avatar_source),
         source_session_id: chat.telegram_account.uuid,
         source_count: source_count
       }
@@ -185,7 +199,8 @@ module Api
         sender_name: member&.name.presence || message.sender_name,
         sender_username: member&.username,
         sender_avatar_small_content_type: member&.avatar_small_content_type,
-        sender_avatar_small_base64: base64_blob(member&.avatar_small_data),
+        sender_avatar_small_url: member_avatar_small_url(member),
+        sender_avatar_small_cache_key: avatar_cache_key(member),
         message_at: message.message_at,
         poll: serialize_poll(poll, account_poll_state_map[poll_key])
       }
@@ -271,14 +286,47 @@ module Api
         username: member.username,
         last_seen: member.last_seen,
         avatar_small_content_type: member.avatar_small_content_type,
-        avatar_small_base64: base64_blob(member.avatar_small_data)
+        avatar_small_url: member_avatar_small_url(member),
+        avatar_small_cache_key: avatar_cache_key(member)
       }
     end
 
-    def base64_blob(blob)
-      return nil if blob.blank?
+    def chat_avatar_small_url(chat)
+      return nil if chat.nil? || chat.avatar_small_data.blank?
 
-      Base64.strict_encode64(blob)
+      "#{request.base_url}/api/me/chats/#{chat.td_chat_id}/avatar?v=#{avatar_cache_key(chat)}"
+    end
+
+    def member_avatar_small_url(member)
+      return nil if member.nil? || member.avatar_small_data.blank?
+
+      "#{request.base_url}/api/me/chats/#{member.group_id}/members/#{member.uid}/avatar?v=#{avatar_cache_key(member)}"
+    end
+
+    def avatar_cache_key(record)
+      return nil if record.nil? || record.avatar_small_data.blank?
+
+      [ record.avatar_small_file_id, record.avatar_small_fetched_at&.to_i, record.avatar_small_data.bytesize ].compact.join("-")
+    end
+
+    def avatar_source_from(records)
+      records.select { |record| record.avatar_small_data.present? }.max_by { |record| record.avatar_small_fetched_at || Time.at(0) }
+    end
+
+    def send_avatar(record)
+      expires_in 1.year, public: true
+      response.headers["X-Content-Type-Options"] = "nosniff"
+      send_data record.avatar_small_data,
+                type: avatar_content_type(record),
+                disposition: "inline",
+                filename: "avatar"
+    end
+
+    def avatar_content_type(record)
+      content_type = record.avatar_small_content_type.to_s
+      return content_type if content_type.start_with?("image/")
+
+      "application/octet-stream"
     end
 
     def normalize_integer_list(raw_value)

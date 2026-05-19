@@ -74,6 +74,101 @@ module Api
       assert_equal [ deleted_message.message_id, visible_message.message_id ], response_body["items"].map { |item| item["message_id"] }
     end
 
+    test "search_messages returns sender avatar url instead of base64" do
+      user = create_system_user
+      account = create_account
+      chat_id = 123_457
+      sender_id = 2003
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+      create_member_with_avatar(group_id: chat_id, uid: sender_id)
+      TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 1003,
+        td_sender_id: sender_id,
+        message_id: 503,
+        message_at: Time.current,
+        text: "avatar message"
+      )
+
+      get "/api/me/search/messages", params: { q: "", chat_id: chat_id }, headers: auth_headers(user)
+
+      assert_response :success
+      item = response.parsed_body.fetch("items").first
+      assert_nil item["sender_avatar_small_base64"]
+      assert_equal "image/png", item["sender_avatar_small_content_type"]
+      assert_equal "42-1714521600-12", item["sender_avatar_small_cache_key"]
+      assert_match %r{\Ahttp://www\.example\.com/api/me/chats/#{chat_id}/members/#{sender_id}/avatar\?v=42-1714521600-12\z}, item["sender_avatar_small_url"]
+    end
+
+    test "chat_members returns avatar url and public avatar endpoint serves bytes" do
+      user = create_system_user
+      chat_id = 123_458
+      member = create_member_with_avatar(group_id: chat_id, uid: 2004)
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+
+      get "/api/me/chats/#{chat_id}/members", headers: auth_headers(user)
+
+      assert_response :success
+      item = response.parsed_body.fetch("items").first
+      assert_nil item["avatar_small_base64"]
+      assert_equal "image/png", item["avatar_small_content_type"]
+      assert_equal "42-1714521600-12", item["avatar_small_cache_key"]
+      assert_match %r{\Ahttp://www\.example\.com/api/me/chats/#{chat_id}/members/#{member.uid}/avatar\?v=42-1714521600-12\z}, item["avatar_small_url"]
+
+      get item.fetch("avatar_small_url")
+
+      assert_response :success
+      assert_equal "avatar-bytes", response.body
+      assert_equal "image/png", response.media_type
+      assert_equal "nosniff", response.headers["X-Content-Type-Options"]
+    end
+
+    test "chats returns avatar url and public chat avatar endpoint serves bytes" do
+      user = create_system_user
+      account = create_account
+      chat_id = 123_459
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+      TelegramChat.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        title: "Avatar Chat",
+        chat_type: "supergroup",
+        synced_at: Time.current,
+        avatar_small_file_id: 99,
+        avatar_small_data: "chat-avatar-bytes",
+        avatar_small_content_type: "image/jpeg",
+        avatar_small_fetched_at: Time.zone.parse("2024-05-02T00:00:00Z")
+      )
+
+      get "/api/me/chats", headers: auth_headers(user)
+
+      assert_response :success
+      item = response.parsed_body.first
+      assert_nil item["avatar_small_base64"]
+      assert_equal "image/jpeg", item["avatar_small_content_type"]
+      assert_equal "99-1714608000-17", item["avatar_small_cache_key"]
+      assert_match %r{\Ahttp://www\.example\.com/api/me/chats/#{chat_id}/avatar\?v=99-1714608000-17\z}, item["avatar_small_url"]
+
+      get item.fetch("avatar_small_url")
+
+      assert_response :success
+      assert_equal "chat-avatar-bytes", response.body
+      assert_equal "image/jpeg", response.media_type
+    end
+
+    test "avatar endpoints return not found when avatar is missing" do
+      chat_id = 123_460
+      uid = 2005
+      create_member_without_avatar(group_id: chat_id, uid: uid)
+
+      get "/api/me/chats/#{chat_id}/avatar"
+      assert_response :not_found
+
+      get "/api/me/chats/#{chat_id}/members/#{uid}/avatar"
+      assert_response :not_found
+    end
+
     test "search_messages filters by message_at range and honors ascending order" do
       user = create_system_user
       account = create_account
@@ -637,6 +732,29 @@ module Api
         state: "created",
         database_directory: Rails.root.join("tmp", "tdlib", uuid, "db").to_s,
         files_directory: Rails.root.join("tmp", "tdlib", uuid, "files").to_s
+      )
+    end
+
+    def create_member_with_avatar(group_id:, uid:)
+      TelegramChatUsername.create!(
+        uid: uid,
+        group_id: group_id,
+        name: "Alice",
+        username: "alice",
+        last_seen: Time.zone.parse("2024-05-01T00:00:00Z"),
+        avatar_small_file_id: 42,
+        avatar_small_data: "avatar-bytes",
+        avatar_small_content_type: "image/png",
+        avatar_small_fetched_at: Time.zone.parse("2024-05-01T00:00:00Z")
+      )
+    end
+
+    def create_member_without_avatar(group_id:, uid:)
+      TelegramChatUsername.create!(
+        uid: uid,
+        group_id: group_id,
+        name: "No Avatar",
+        last_seen: Time.current
       )
     end
 
