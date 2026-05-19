@@ -90,6 +90,7 @@ module Api
       user_ids = normalize_integer_list(params[:user_ids])
       include_deleted = ActiveModel::Type::Boolean.new.cast(params[:include_deleted])
       resolve_links = ActiveModel::Type::Boolean.new.cast(params[:resolve_links])
+      poll_option_search = query.present? && ActiveModel::Type::Boolean.new.cast(params[:is_poll_option])
       start_at = parse_message_time_param(:start_at, boundary: :start)
       return if performed?
 
@@ -116,14 +117,14 @@ module Api
       scope = scope.where(telegram_messages: { deleted_at: nil }) unless include_deleted
       scope = scope.where(telegram_messages: { td_sender_id: user_ids }) if user_ids.any?
       scope = apply_message_time_range(scope, start_at:, end_at:)
-      scope = apply_message_query(scope, query:, mode: params[:mode].to_s) if query.present?
+      scope = apply_message_query(scope, query:, mode: params[:mode].to_s, poll_option_search:) if query.present?
 
       total = scope.count
       highlight_sql = if query.present?
                         ActiveRecord::Base.send(
                           :sanitize_sql_array,
                           [
-                            "pgroonga_highlight_html(COALESCE(telegram_messages.text, matched_telegram_polls.question), ARRAY[?]::text[]) AS highlight",
+                            "pgroonga_highlight_html(#{message_highlight_source_sql(poll_option_search:)}, ARRAY[?]::text[]) AS highlight",
                             query
                           ]
                         )
@@ -131,9 +132,9 @@ module Api
                         "NULL AS highlight"
       end
       messages = scope
-                 .joins(search_message_poll_join_sql)
+                 .joins(search_message_poll_join_sql(query:, mode: params[:mode].to_s, poll_option_search:))
                  .includes(:telegram_account)
-                 .select("telegram_messages.*", highlight_sql, "matched_telegram_polls.id AS matched_poll_id")
+                 .select("telegram_messages.*", highlight_sql, "matched_telegram_polls.id AS matched_poll_id", "matched_telegram_polls.matched_option_text AS matched_poll_option_text")
                  .reorder(*message_order_nodes(message_order))
                  .offset(offset)
                  .limit(per_page)
@@ -158,7 +159,11 @@ module Api
             account_poll_state_map:,
             resolve_links:,
             message_link_sessions:
-          ).merge(highlight: message.try(:highlight))
+          ).merge(
+            highlight: message.try(:highlight),
+            is_poll_option: poll_option_search,
+            matched_poll_option_text: message.try(:matched_poll_option_text)
+          )
         end
       }
     end
@@ -387,32 +392,67 @@ module Api
       scope
     end
 
-    def apply_message_query(scope, query:, mode:)
-      operator = mode == "regex" ? "&~" : "&@~"
+    def apply_message_query(scope, query:, mode:, poll_option_search:)
+      operator = message_search_operator(mode)
       predicate = ActiveRecord::Base.send(
         :sanitize_sql_array,
-        [
-          <<~SQL.squish,
-            (
-              telegram_messages.text #{operator} ?
-              OR (
-                COALESCE(telegram_messages.text, '') = ''
-                AND EXISTS (
-                  SELECT 1
-                  FROM telegram_polls
-                  WHERE telegram_polls.td_chat_id = telegram_messages.td_chat_id
-                    AND telegram_polls.message_id = telegram_messages.message_id
-                    AND telegram_polls.question #{operator} ?
-                )
-              )
-            )
-          SQL
-          query,
-          query
-        ]
+        poll_option_search ? poll_option_search_predicate(operator, query) : message_search_predicate(operator, query)
       )
 
       scope.where(predicate)
+    end
+
+    def message_search_operator(mode)
+      mode == "regex" ? "&~" : "&@~"
+    end
+
+    def message_search_predicate(operator, query)
+      [
+        <<~SQL.squish,
+          (
+            telegram_messages.text #{operator} ?
+            OR (
+              COALESCE(telegram_messages.text, '') = ''
+              AND EXISTS (
+                SELECT 1
+                FROM telegram_polls
+                WHERE telegram_polls.td_chat_id = telegram_messages.td_chat_id
+                  AND telegram_polls.message_id = telegram_messages.message_id
+                  AND telegram_polls.question #{operator} ?
+              )
+            )
+          )
+        SQL
+        query,
+        query
+      ]
+    end
+
+    def poll_option_search_predicate(operator, query)
+      [
+        <<~SQL.squish,
+          EXISTS (
+            SELECT 1
+            FROM telegram_polls
+            LEFT JOIN telegram_poll_options ON telegram_poll_options.telegram_poll_id = telegram_polls.id
+            LEFT JOIN LATERAL jsonb_array_elements(#{raw_poll_options_sql}) AS raw_option(value) ON TRUE
+            WHERE telegram_polls.td_chat_id = telegram_messages.td_chat_id
+              AND telegram_polls.message_id = telegram_messages.message_id
+              AND (
+                telegram_poll_options.text #{operator} ?
+                OR #{raw_poll_option_text_sql} #{operator} ?
+              )
+          )
+        SQL
+        query,
+        query
+      ]
+    end
+
+    def message_highlight_source_sql(poll_option_search:)
+      return "matched_telegram_polls.matched_option_text" if poll_option_search
+
+      "COALESCE(telegram_messages.text, matched_telegram_polls.question)"
     end
 
     def normalize_message_order
@@ -468,10 +508,12 @@ module Api
       message.try(:matched_poll_id).to_i.presence
     end
 
-    def search_message_poll_join_sql
+    def search_message_poll_join_sql(query:, mode:, poll_option_search:)
+      return poll_option_search_join_sql(query:, mode:) if poll_option_search
+
       <<~SQL.squish
         LEFT JOIN LATERAL (
-          SELECT telegram_polls.id, telegram_polls.question
+          SELECT telegram_polls.id, telegram_polls.question, NULL::text AS matched_option_text
           FROM telegram_polls
           WHERE telegram_polls.td_chat_id = telegram_messages.td_chat_id
             AND telegram_polls.message_id = telegram_messages.message_id
@@ -481,6 +523,54 @@ module Api
           LIMIT 1
         ) matched_telegram_polls ON TRUE
       SQL
+    end
+
+    def poll_option_search_join_sql(query:, mode:)
+      operator = message_search_operator(mode)
+      ActiveRecord::Base.send(
+        :sanitize_sql_array,
+        [
+          <<~SQL.squish,
+            LEFT JOIN LATERAL (
+              SELECT telegram_polls.id,
+                     telegram_polls.question,
+                     COALESCE(matched_option.text, matched_raw_option.text) AS matched_option_text
+              FROM telegram_polls
+              LEFT JOIN LATERAL (
+                SELECT telegram_poll_options.text
+                FROM telegram_poll_options
+                WHERE telegram_poll_options.telegram_poll_id = telegram_polls.id
+                  AND telegram_poll_options.text #{operator} ?
+                ORDER BY telegram_poll_options.option_index ASC
+                LIMIT 1
+              ) matched_option ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT #{raw_poll_option_text_sql} AS text
+                FROM jsonb_array_elements(#{raw_poll_options_sql}) AS raw_option(value)
+                WHERE #{raw_poll_option_text_sql} #{operator} ?
+                LIMIT 1
+              ) matched_raw_option ON TRUE
+              WHERE telegram_polls.td_chat_id = telegram_messages.td_chat_id
+                AND telegram_polls.message_id = telegram_messages.message_id
+                AND (matched_option.text IS NOT NULL OR matched_raw_option.text IS NOT NULL)
+              ORDER BY (telegram_polls.telegram_account_id = telegram_messages.telegram_account_id) DESC,
+                       telegram_polls.updated_at DESC,
+                       telegram_polls.id DESC
+              LIMIT 1
+            ) matched_telegram_polls ON TRUE
+          SQL
+          query,
+          query
+        ]
+      )
+    end
+
+    def raw_poll_options_sql
+      "CASE WHEN jsonb_typeof(telegram_polls.raw_payload -> 'options') = 'array' THEN telegram_polls.raw_payload -> 'options' ELSE '[]'::jsonb END"
+    end
+
+    def raw_poll_option_text_sql
+      "CASE WHEN jsonb_typeof(raw_option.value -> 'text') = 'object' THEN raw_option.value #>> '{text,text}' ELSE raw_option.value ->> 'text' END"
     end
 
     def account_poll_state_map_for(messages)

@@ -322,6 +322,7 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 | `user_ids` | integer[] | 否 | 发送者过滤，支持 `user_ids[]=1&user_ids[]=2` 或 `user_ids=1,2` |
 | `include_deleted` | boolean | 否 | 是否包含软删除消息，默认 `false` |
 | `resolve_links` | boolean | 否 | 是否解析 Telegram 消息链接，默认 `false` |
+| `is_poll_option` | boolean | 否 | 为 `true` 时只搜索投票选项文本，并在结果中标记 `is_poll_option: true`；默认 `false`，按消息文本/投票题目搜索 |
 | `start_at` | string | 否 | 按 `message_at` 起始时间过滤，ISO8601，包含边界；也接受 `start_time`、`start_date`、`from`、`date_from`，纯日期会按当天 `00:00:00` 处理 |
 | `end_at` | string | 否 | 按 `message_at` 结束时间过滤，ISO8601，包含边界；也接受 `end_time`、`end_date`、`to`、`date_to`，纯日期会按当天 `23:59:59.999999` 处理 |
 | `order` | string | 否 | 按 `message_at` 排序，支持 `asc`/`desc`，也兼容 `direction`、`sort_order`、`sort` 以及 `ascend`、`ascending`、`oldest`、`descend`、`descending`、`newest`、`latest` |
@@ -372,7 +373,9 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
           "chosen_option_indexes": [0]
         }
       },
-      "highlight": "<span class=\"keyword\">hello</span> world"
+      "highlight": "<span class=\"keyword\">hello</span> world",
+      "is_poll_option": false,
+      "matched_poll_option_text": null
     }
   ]
 }
@@ -381,7 +384,8 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 注意：
 
 - 如果 `chat_id` 不在当前用户权限范围内，当前实现返回的是空数组 `[]`，不是分页对象。
-- `highlight` 只有在 `q` 非空时才有值。
+- `highlight` 只有在 `q` 非空时才有值；`is_poll_option=true` 时高亮来源是命中的投票选项文本。
+- `is_poll_option=true` 时只搜索投票选项文本；`matched_poll_option_text` 返回命中的选项文本。
 - `message_id` 是 Telegram `privatepost` 可用的 `post` 序号，不等于原始 `td_message_id`。
 - `poll` 只有 poll 消息才会返回，按消息的 `td_chat_id` 和 `message_id` 直接关联 poll 快照；`options[].is_correct` 可能为 `null`。
 - `start_at`、`end_at` 或 `order` 非法时返回 `400` 和 `{ "error": "..." }`。

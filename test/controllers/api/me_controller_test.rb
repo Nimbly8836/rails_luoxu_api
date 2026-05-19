@@ -558,6 +558,110 @@ module Api
       assert_equal [ "First", "Second" ], options.map { |option| option["text"] }
     end
 
+    test "search_messages searches persisted poll option text when requested" do
+      user = create_system_user
+      account = create_account
+      chat_id = 877_543
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+      message = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 2701,
+        td_sender_id: 3701,
+        message_id: 671,
+        message_at: Time.current,
+        text: "plain body"
+      )
+      poll = TelegramPoll.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        message_id: message.message_id,
+        poll_id: "poll_671",
+        question: "Dinner poll",
+        is_anonymous: true,
+        allows_multiple_answers: false,
+        total_voter_count: 2,
+        is_closed: false,
+        raw_payload: {}
+      )
+      TelegramPollOption.create!(
+        telegram_poll: poll,
+        option_index: 0,
+        text: "Falafel bowl",
+        voter_count: 1,
+        is_chosen: false
+      )
+      TelegramPollOption.create!(
+        telegram_poll: poll,
+        option_index: 1,
+        text: "Soup",
+        voter_count: 1,
+        is_chosen: false
+      )
+
+      get "/api/me/search/messages", params: { q: "Falafel", chat_id: chat_id }, headers: auth_headers(user)
+
+      assert_response :success
+      assert_equal 0, response.parsed_body["total"]
+
+      get "/api/me/search/messages",
+          params: { q: "Falafel", chat_id: chat_id, is_poll_option: true },
+          headers: auth_headers(user)
+
+      assert_response :success
+      item = response.parsed_body.fetch("items").first
+      assert_equal 1, response.parsed_body["total"]
+      assert_equal message.message_id, item["message_id"]
+      assert_equal true, item["is_poll_option"]
+      assert_equal "Falafel bowl", item["matched_poll_option_text"]
+      assert_equal [ "Falafel bowl", "Soup" ], item.dig("poll", "options").map { |option| option["text"] }
+    end
+
+    test "search_messages searches raw poll option text when requested" do
+      user = create_system_user
+      account = create_account
+      chat_id = 878_543
+      SystemUserChatAccess.create!(system_user: user, td_chat_id: chat_id)
+      message = TelegramMessage.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        td_message_id: 2702,
+        td_sender_id: 3702,
+        message_id: 672,
+        message_at: Time.current,
+        text: "plain body"
+      )
+      TelegramPoll.create!(
+        telegram_account: account,
+        td_chat_id: chat_id,
+        message_id: message.message_id,
+        poll_id: "poll_672",
+        question: "Raw dinner poll",
+        is_anonymous: true,
+        allows_multiple_answers: false,
+        total_voter_count: 2,
+        is_closed: false,
+        raw_payload: {
+          "options" => [
+            { "text" => { "text" => "Raw mango" }, "voter_count" => 1 },
+            { "text" => "Raw pear", "voter_count" => 1 }
+          ]
+        }
+      )
+
+      get "/api/me/search/messages",
+          params: { q: "Raw mango", chat_id: chat_id, is_poll_option: true },
+          headers: auth_headers(user)
+
+      assert_response :success
+      item = response.parsed_body.fetch("items").first
+      assert_equal 1, response.parsed_body["total"]
+      assert_equal message.message_id, item["message_id"]
+      assert_equal true, item["is_poll_option"]
+      assert_equal "Raw mango", item["matched_poll_option_text"]
+      assert_equal [ "Raw mango", "Raw pear" ], item.dig("poll", "options").map { |option| option["text"] }
+    end
+
     test "search_messages falls back to poll question when message text is blank" do
       user = create_system_user
       poll_account = create_account
