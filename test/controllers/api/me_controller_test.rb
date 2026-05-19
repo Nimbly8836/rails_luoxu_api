@@ -425,6 +425,7 @@ module Api
               "option_index" => 0,
               "text" => "A",
               "voter_count" => 3,
+              "voter_percentage" => 42.86,
               "is_chosen" => false,
               "is_correct" => false
             },
@@ -432,8 +433,23 @@ module Api
               "option_index" => 1,
               "text" => "B",
               "voter_count" => 4,
+              "voter_percentage" => 57.14,
               "is_chosen" => true,
               "is_correct" => true
+            }
+          ],
+          "option_distribution" => [
+            {
+              "option_index" => 0,
+              "text" => "A",
+              "voter_count" => 3,
+              "voter_percentage" => 42.86
+            },
+            {
+              "option_index" => 1,
+              "text" => "B",
+              "voter_count" => 4,
+              "voter_percentage" => 57.14
             }
           ],
           "account_state" => {
@@ -496,6 +512,7 @@ module Api
             "option_index" => 0,
             "text" => "First",
             "voter_count" => 2,
+            "voter_percentage" => 40.0,
             "is_chosen" => false,
             "is_correct" => true
           },
@@ -503,6 +520,7 @@ module Api
             "option_index" => 1,
             "text" => "Second",
             "voter_count" => 0,
+            "voter_percentage" => 0.0,
             "is_chosen" => false,
             "is_correct" => nil
           }

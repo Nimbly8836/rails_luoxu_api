@@ -364,8 +364,17 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
             "option_index": 0,
             "text": "A",
             "voter_count": 3,
+            "voter_percentage": 42.86,
             "is_chosen": false,
             "is_correct": false
+          }
+        ],
+        "option_distribution": [
+          {
+            "option_index": 0,
+            "text": "A",
+            "voter_count": 3,
+            "voter_percentage": 42.86
           }
         ],
         "account_state": {
@@ -388,6 +397,7 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
 - `is_poll_option=true` 时只搜索投票选项文本；`matched_poll_option_text` 返回命中的选项文本。
 - `message_id` 是 Telegram `privatepost` 可用的 `post` 序号，不等于原始 `td_message_id`。
 - `poll` 只有 poll 消息才会返回，按消息的 `td_chat_id` 和 `message_id` 直接关联 poll 快照；`options[].is_correct` 可能为 `null`。
+- `poll.options[].voter_percentage` 和 `poll.option_distribution` 基于 `total_voter_count` 计算，保留两位小数；总票数为 0 时返回 `0.0`。
 - `start_at`、`end_at` 或 `order` 非法时返回 `400` 和 `{ "error": "..." }`。
 
 ## Telegram Chats

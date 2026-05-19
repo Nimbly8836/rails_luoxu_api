@@ -221,6 +221,7 @@ module Api
         total_voter_count: poll.total_voter_count,
         is_closed: poll.is_closed,
         options: serialize_poll_options(poll),
+        option_distribution: serialize_poll_option_distribution(poll),
         account_state: {
           has_voted: account_state&.has_voted || false,
           chosen_option_indexes: account_state&.chosen_option_indexes || []
@@ -229,6 +230,18 @@ module Api
     end
 
     def serialize_poll_options(poll)
+      serialize_poll_options_without_distribution(poll).map do |option|
+        option.merge(poll_option_distribution_fields(option[:voter_count], poll.total_voter_count))
+      end
+    end
+
+    def serialize_poll_option_distribution(poll)
+      serialize_poll_options(poll).map do |option|
+        option.slice(:option_index, :text, :voter_count, :voter_percentage)
+      end
+    end
+
+    def serialize_poll_options_without_distribution(poll)
       option_rows = poll.telegram_poll_options.sort_by(&:option_index)
       row_options = option_rows.map { |option| serialize_poll_option_row(option) }
       raw_options = serialize_raw_poll_options(poll)
@@ -237,6 +250,14 @@ module Api
       return row_options if row_options.any?
 
       raw_options
+    end
+
+    def poll_option_distribution_fields(voter_count, total_voter_count)
+      total = total_voter_count.to_i
+      count = voter_count.to_i
+      {
+        voter_percentage: total.positive? ? ((count.to_f / total) * 100).round(2) : 0.0
+      }
     end
 
     def serialize_raw_poll_options(poll)
