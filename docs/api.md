@@ -11,7 +11,7 @@
 
 ### 鉴权
 
-- 除 `POST /api/auth/login` 外，所有接口默认都要求：
+- 除 `POST /api/auth/login` 和响应里返回的头像图片 URL 外，所有接口默认都要求：
 
 ```http
 Authorization: Bearer <api_token>
@@ -69,7 +69,8 @@ Content-Type: application/json
   "title": "Test Group",
   "chat_type": "supergroup",
   "avatar_small_content_type": "image/jpeg",
-  "avatar_small_base64": "BASE64...",
+  "avatar_small_url": "http://127.0.0.1/api/me/chats/-1001234567890/avatar?v=12345-1714521600-2048",
+  "avatar_small_cache_key": "12345-1714521600-2048",
   "source_session_id": "2dbd1e1e-6e0f-4a3b-a963-04cb5b5f2f95",
   "source_count": 2
 }
@@ -237,12 +238,15 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
     "title": "Test Group",
     "chat_type": "supergroup",
     "avatar_small_content_type": "image/jpeg",
-    "avatar_small_base64": "BASE64...",
+    "avatar_small_url": "http://127.0.0.1/api/me/chats/-1001234567890/avatar?v=12345-1714521600-2048",
+    "avatar_small_cache_key": "12345-1714521600-2048",
     "source_session_id": "2dbd1e1e-6e0f-4a3b-a963-04cb5b5f2f95",
     "source_count": 2
   }
 ]
 ```
+
+头像 URL 长期有效，不需要 `Authorization` 头，可直接作为图片地址访问；头像更新后 `avatar_small_url` 和 `avatar_small_cache_key` 会变化。
 
 ### GET `/api/me/chats/:chat_id`
 
@@ -292,7 +296,8 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
       "username": "alice",
       "last_seen": "2026-03-16T01:00:00.000Z",
       "avatar_small_content_type": "image/jpeg",
-      "avatar_small_base64": "BASE64..."
+      "avatar_small_url": "http://127.0.0.1/api/me/chats/-1001234567890/members/123456/avatar?v=67890-1714521600-2048",
+      "avatar_small_cache_key": "67890-1714521600-2048"
     }
   ]
 }
@@ -344,7 +349,8 @@ curl -X PATCH http://127.0.0.1/api/auth/users/2/chat_ids \
       "sender_name": "Alice",
       "sender_username": "alice",
       "sender_avatar_small_content_type": "image/jpeg",
-      "sender_avatar_small_base64": "BASE64...",
+      "sender_avatar_small_url": "http://127.0.0.1/api/me/chats/-1001234567890/members/123456/avatar?v=67890-1714521600-2048",
+      "sender_avatar_small_cache_key": "67890-1714521600-2048",
       "message_at": "2026-03-16T01:00:00.000Z",
       "poll": {
         "question": "Pick a letter",
