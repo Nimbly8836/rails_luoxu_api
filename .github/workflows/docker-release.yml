@@ -54,7 +54,7 @@ jobs:
         run: echo "commit=$(sed -n 's/^ARG TDLIB_COMMIT=//p' Dockerfile | head -n1)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push amd64 image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
